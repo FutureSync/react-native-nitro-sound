@@ -39,6 +39,7 @@ public protocol HybridSoundSpec_protocol: HybridObject {
   func mergeAudioFiles(filePaths: [String], outputPath: String?) throws -> Promise<MergeResult>
   func getAudioDuration(filePath: String) throws -> Promise<Double>
   func validateAudio(filePath: String, minDurationSecs: Double?) throws -> Promise<AudioValidationResult>
+  func resetRecordingState() throws -> Promise<String>
 }
 
 public extension HybridSoundSpec_protocol {

@@ -50,6 +50,21 @@ class WavToM4aConverter {
         }
     }
     
+    /// Ensure an audio session is active so the hardware AAC encoder is available.
+    /// After an interruption (Siri, phone call) iOS reclaims hardware resources;
+    /// re-activating the session before creating the AVAssetWriter prevents
+    /// "encoder not found" / -16976 failures.
+    private static func ensureAudioSessionForEncoding() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+            print("🎵 [WavToM4a] Audio session activated for AAC encoding")
+        } catch {
+            print("⚠️ [WavToM4a] Could not activate audio session for encoding: \(error)")
+        }
+    }
+
     /**
      * Synchronous version of convert.
      */
@@ -59,6 +74,10 @@ class WavToM4aConverter {
         bitRate: Int = defaultBitRate,
         deleteWavAfterConversion: Bool = true
     ) -> ConversionResult {
+        // Activate audio session to ensure hardware AAC encoder is available
+        // (critical after Siri / phone call interruptions)
+        ensureAudioSessionForEncoding()
+
         let wavURL = URL(fileURLWithPath: wavFilePath)
         
         // Check if WAV file exists

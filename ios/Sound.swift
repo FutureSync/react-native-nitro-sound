@@ -405,14 +405,51 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     public func resumeRecorder() throws -> Promise<String> {
         let promise = Promise<String>()
 
-        if let recorder = self.audioRecorder, !recorder.isRecording {
+        guard let recorder = self.audioRecorder else {
+            promise.reject(withError: RuntimeError.error(withMessage: "No active recorder to resume. Recorder may have been stopped by system interruption (e.g., phone call). Start a new recording segment instead."))
+            return promise
+        }
+
+        if recorder.isRecording {
+            promise.reject(withError: RuntimeError.error(withMessage: "Recorder is already recording"))
+        } else {
             recorder.record()
             DispatchQueue.main.async {
                 self.startRecordTimer()
             }
             promise.resolve(withResult: "Recorder resumed")
-        } else {
-            promise.reject(withError: RuntimeError.error(withMessage: "Recorder is already recording"))
+        }
+
+        return promise
+    }
+
+    public func resetRecordingState() throws -> Promise<String> {
+        let promise = Promise<String>()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else {
+                promise.resolve(withResult: "Recorder reset")
+                return
+            }
+
+            if let recorder = self.audioRecorder {
+                if recorder.isRecording {
+                    recorder.stop()
+                }
+                self.audioRecorder = nil
+            }
+
+            self.stopRecordTimer()
+            self.removeInterruptionObserver()
+
+            if let session = self.recordingSession {
+                try? session.setActive(false)
+                self.recordingSession = nil
+            }
+
+            self.recordBackListener = nil
+
+            promise.resolve(withResult: "Recorder reset")
         }
 
         return promise
@@ -815,6 +852,8 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 for wavURL in wavFiles {
                     let wavPath = wavURL.path
                     
+                    _ = self.repairWavFile(wavPath)
+                    
                     // Convert to M4A
                     let result = WavToM4aConverter.convertSync(
                         wavFilePath: wavPath,
@@ -881,6 +920,8 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 promise.reject(withError: RuntimeError.error(withMessage: "File is not a WAV file: \(wavFilePath)"))
                 return
             }
+            
+            _ = self.repairWavFile(wavFilePath)
             
             // Convert to M4A
             let result = WavToM4aConverter.convertSync(
@@ -1347,109 +1388,288 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     }
                 }
 
-                let resolvedOutputURL: URL
+                let resolvedOutputPath: String
                 if let out = outputPath {
-                    let stdOut = (out as NSString).standardizingPath
-                    guard Self.validatePathSecurity(path: stdOut) else {
-                        promise.reject(withError: RuntimeError.error(withMessage: "Access denied: output path is outside allowed paths"))
-                        return
-                    }
-                    resolvedOutputURL = URL(fileURLWithPath: stdOut)
+                    resolvedOutputPath = (out as NSString).standardizingPath
                 } else {
                     let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                     let name = "merged_\(Int(Date().timeIntervalSince1970 * 1000)).m4a"
-                    resolvedOutputURL = docs.appendingPathComponent(name)
+                    resolvedOutputPath = docs.appendingPathComponent(name).path
                 }
 
+                let resolvedOutputURL = URL(fileURLWithPath: resolvedOutputPath)
                 let parentDir = resolvedOutputURL.deletingLastPathComponent()
                 if !FileManager.default.fileExists(atPath: parentDir.path) {
                     try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
                 }
 
-                var segments: [(AVURLAsset, AVAssetTrack)] = []
-                var allAAC = true
+                // Single WAV file: use WavToM4aConverter directly (AVAssetReader+Writer).
+                // AVAssetExportSession with AppleM4A preset is unreliable for PCM→AAC
+                // transcoding on some devices/OS versions ("Export failed" / "Operation Stopped").
+                // WavToM4aConverter is the same path used by stopRecorder() and is proven stable.
+                if filePaths.count == 1 {
+                    let singlePath = (filePaths[0] as NSString).standardizingPath
+                    if singlePath.lowercased().hasSuffix(".wav") {
+                        _ = self.repairWavFile(singlePath)
+                        let convResult = WavToM4aConverter.convertSync(
+                            wavFilePath: singlePath,
+                            m4aFilePath: resolvedOutputPath,
+                            deleteWavAfterConversion: false
+                        )
+                        switch convResult {
+                        case .success(let outPath, let duration):
+                            promise.resolve(withResult: MergeResult(outputPath: outPath, duration: duration, inputCount: 1))
+                        case .error(let message):
+                            promise.reject(withError: RuntimeError.error(withMessage: "WAV conversion failed: \(message)"))
+                        }
+                        return
+                    }
+                }
+
+                // ---- Multi-file merge using AVAssetReader + AVAssetWriter ----
+                // AVAssetExportSession is unreliable after iOS call interruption (err=-16976).
+                // AVAssetReader + AVAssetWriter needs an active audio session so the
+                // hardware AAC encoder is available (Siri / phone call may have reclaimed it).
+                let mergeSession = AVAudioSession.sharedInstance()
+                do {
+                    try mergeSession.setCategory(.playback, mode: .default)
+                    try mergeSession.setActive(true)
+                } catch {
+                    print("⚠️ [Merge] Could not activate audio session for AAC encoding: \(error)")
+                }
+
+                var totalSize: UInt64 = 0
+                var totalDuration: Double = 0
+
+                print("===== Start Merging ===")
+
+                // Collect and validate input files, get format info from first file
+                struct InputFile {
+                    let path: String
+                    let asset: AVAsset
+                    let track: AVAssetTrack
+                    let duration: CMTime
+                }
+
+                var inputs: [InputFile] = []
 
                 for raw in filePaths {
                     let std = (raw as NSString).standardizingPath
+
                     if std.lowercased().hasSuffix(".wav") {
                         _ = self.repairWavFile(std)
                     }
 
-                    let fileURL = URL(fileURLWithPath: std)
-                    let asset = AVURLAsset(url: fileURL)
-                    try Self.awaitLoadKeys(asset, keys: ["tracks", "duration"])
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: std)
+                    let fileSize = (attrs?[.size] as? UInt64) ?? 0
+                    totalSize += fileSize
+                    print("=====File: \(std), Size: \(String(format: "%.2f", Double(fileSize) / 1024.0)) KB")
 
-                    let audioTracks = asset.tracks(withMediaType: .audio)
-                    guard let audioTrack = audioTracks.first else {
-                        print("⚠️ [Sound] mergeAudioFiles: skipping file with no audio tracks: \(std)")
+                    let asset = AVAsset(url: URL(fileURLWithPath: std))
+                    let tracks = asset.tracks(withMediaType: .audio)
+                    guard let audioTrack = tracks.first else {
+                        print("=====⚠️ Skipping file with no audio track: \(std)")
                         continue
                     }
 
-                    if !Self.audioTrackIsAAC(audioTrack) {
-                        allAAC = false
-                    }
-
-                    segments.append((asset, audioTrack))
+                    let dur = asset.duration
+                    totalDuration += dur.seconds
+                    inputs.append(InputFile(path: std, asset: asset, track: audioTrack, duration: dur))
                 }
 
-                guard !segments.isEmpty else {
+                print("=====Total input size: \(String(format: "%.2f", Double(totalSize) / 1024.0)) KB")
+                print("=====Total input duration: \(String(format: "%.2f", totalDuration))s, \(inputs.count) files")
+
+                guard !inputs.isEmpty else {
                     promise.reject(withError: RuntimeError.error(withMessage: "No audio tracks found in input files"))
                     return
                 }
 
-                let composition = AVMutableComposition()
-                guard let compositionTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create composition track"))
-                    return
+                // Get format info from first track for output settings
+                let firstTrack = inputs[0].track
+                let formatDescs = firstTrack.formatDescriptions as? [CMFormatDescription] ?? []
+                var sampleRate: Double = 44100
+                var channels: UInt32 = 1
+                if let desc = formatDescs.first,
+                   let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
+                    sampleRate = asbd.mSampleRate
+                    channels = asbd.mChannelsPerFrame
                 }
+                print("=====Output format: \(sampleRate)Hz, \(channels)ch")
 
-                var insertAt = CMTime.zero
-                for (asset, audioTrack) in segments {
-                    let duration = asset.duration
-                    let range = CMTimeRange(start: .zero, duration: duration)
-                    try compositionTrack.insertTimeRange(range, of: audioTrack, at: insertAt)
-                    insertAt = CMTimeAdd(insertAt, duration)
-                }
-
-                let preset = allAAC ? AVAssetExportPresetPassthrough : AVAssetExportPresetAppleM4A
-                guard let exportSession = AVAssetExportSession(asset: composition, presetName: preset) else {
-                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create export session"))
-                    return
-                }
-
-                if FileManager.default.fileExists(atPath: resolvedOutputURL.path) {
+                // Delete existing output
+                if FileManager.default.fileExists(atPath: resolvedOutputPath) {
                     try FileManager.default.removeItem(at: resolvedOutputURL)
                 }
 
-                exportSession.outputURL = resolvedOutputURL
-                exportSession.outputFileType = .m4a
-                exportSession.shouldOptimizeForNetworkUse = false
+                // Setup AVAssetWriter (same approach as WavToM4aConverter)
+                let writer: AVAssetWriter
+                do {
+                    writer = try AVAssetWriter(outputURL: resolvedOutputURL, fileType: .m4a)
+                } catch {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create writer: \(error.localizedDescription)"))
+                    return
+                }
 
-                exportSession.exportAsynchronously {
-                    switch exportSession.status {
-                    case .completed:
-                        guard FileManager.default.fileExists(atPath: resolvedOutputURL.path) else {
-                            promise.reject(withError: RuntimeError.error(withMessage: "Merged file was not written"))
+                var channelLayout = AudioChannelLayout()
+                channelLayout.mChannelLayoutTag = channels == 2
+                    ? kAudioChannelLayoutTag_Stereo
+                    : kAudioChannelLayoutTag_Mono
+                let channelLayoutData = Data(bytes: &channelLayout, count: MemoryLayout<AudioChannelLayout>.size)
+
+                let writerInputSettings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: sampleRate,
+                    AVNumberOfChannelsKey: channels,
+                    AVEncoderBitRateKey: 128000,
+                    AVChannelLayoutKey: channelLayoutData
+                ]
+
+                let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: writerInputSettings)
+                writerInput.expectsMediaDataInRealTime = false
+
+                guard writer.canAdd(writerInput) else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Cannot add writer input"))
+                    return
+                }
+                writer.add(writerInput)
+
+                guard writer.startWriting() else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to start writing: \(writer.error?.localizedDescription ?? "unknown")"))
+                    return
+                }
+                writer.startSession(atSourceTime: .zero)
+
+                // PCM decode settings (same as WavToM4aConverter)
+                let readerOutputSettings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatLinearPCM,
+                    AVSampleRateKey: sampleRate,
+                    AVNumberOfChannelsKey: channels,
+                    AVLinearPCMBitDepthKey: 16,
+                    AVLinearPCMIsFloatKey: false,
+                    AVLinearPCMIsBigEndianKey: false,
+                    AVLinearPCMIsNonInterleaved: false
+                ]
+
+                // Process all input files sequentially: decode → PCM → encode → AAC
+                // Uses a single requestMediaDataWhenReady callback that feeds samples
+                // from multiple readers in sequence (cannot call requestMediaDataWhenReady twice).
+                var mergeError: String? = nil
+
+                // Prepare all readers upfront
+                struct ReaderPair {
+                    let reader: AVAssetReader
+                    let output: AVAssetReaderTrackOutput
+                    let index: Int
+                    let filename: String
+                }
+
+                var readerPairs: [ReaderPair] = []
+                for (index, input) in inputs.enumerated() {
+                    let reader: AVAssetReader
+                    do {
+                        reader = try AVAssetReader(asset: input.asset)
+                    } catch {
+                        mergeError = "Failed to create reader for file \(index): \(error.localizedDescription)"
+                        break
+                    }
+
+                    let readerOutput = AVAssetReaderTrackOutput(track: input.track, outputSettings: readerOutputSettings)
+                    guard reader.canAdd(readerOutput) else {
+                        mergeError = "Cannot add reader output for file \(index)"
+                        break
+                    }
+                    reader.add(readerOutput)
+
+                    guard reader.startReading() else {
+                        mergeError = "Failed to start reading file \(index): \(reader.error?.localizedDescription ?? "unknown")"
+                        break
+                    }
+
+                    let filename = input.path.components(separatedBy: "/").last ?? "file\(index)"
+                    readerPairs.append(ReaderPair(reader: reader, output: readerOutput, index: index, filename: filename))
+                }
+
+                if let err = mergeError {
+                    for pair in readerPairs { pair.reader.cancelReading() }
+                    writer.cancelWriting()
+                    promise.reject(withError: RuntimeError.error(withMessage: err))
+                    return
+                }
+
+                // Single requestMediaDataWhenReady that processes all files in sequence
+                var currentPairIndex = 0
+                let queue = DispatchQueue(label: "com.nitrosound.merge", qos: .userInitiated)
+                let semaphore = DispatchSemaphore(value: 0)
+
+                writerInput.requestMediaDataWhenReady(on: queue) {
+                    while writerInput.isReadyForMoreMediaData {
+                        guard currentPairIndex < readerPairs.count else {
+                            semaphore.signal()
                             return
                         }
-                        do {
-                            let durationSecs = try Self.durationSeconds(of: resolvedOutputURL)
-                            let result = MergeResult(
-                                outputPath: resolvedOutputURL.path,
-                                duration: durationSecs,
-                                inputCount: Double(segments.count)
-                            )
-                            promise.resolve(withResult: result)
-                        } catch {
-                            promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
+
+                        let pair = readerPairs[currentPairIndex]
+
+                        if let sampleBuffer = pair.output.copyNextSampleBuffer() {
+                            writerInput.append(sampleBuffer)
+                        } else {
+                            // Current file exhausted
+                            if pair.reader.status == .failed {
+                                mergeError = "Reader failed for file \(pair.index): \(pair.reader.error?.localizedDescription ?? "unknown")"
+                                semaphore.signal()
+                                return
+                            }
+                            pair.reader.cancelReading()
+                            print("=====✅ Processed file \(pair.index + 1)/\(inputs.count): \(pair.filename)")
+                            currentPairIndex += 1
                         }
-                    case .failed, .cancelled:
-                        let msg = exportSession.error?.localizedDescription ?? "Export failed"
-                        promise.reject(withError: RuntimeError.error(withMessage: msg))
-                    default:
-                        promise.reject(withError: RuntimeError.error(withMessage: "Unexpected export status"))
                     }
                 }
+
+                semaphore.wait()
+
+                if let err = mergeError {
+                    writer.cancelWriting()
+                    promise.reject(withError: RuntimeError.error(withMessage: err))
+                    return
+                }
+
+                // Finish writing
+                writerInput.markAsFinished()
+                let finishSemaphore = DispatchSemaphore(value: 0)
+                writer.finishWriting {
+                    finishSemaphore.signal()
+                }
+                finishSemaphore.wait()
+
+                if writer.status == .failed {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Writer failed: \(writer.error?.localizedDescription ?? "unknown")"))
+                    return
+                }
+
+                // Verify output
+                guard FileManager.default.fileExists(atPath: resolvedOutputPath) else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Merged file was not written"))
+                    return
+                }
+
+                let outputAttrs = try? FileManager.default.attributesOfItem(atPath: resolvedOutputPath)
+                let outputSize = (outputAttrs?[.size] as? UInt64) ?? 0
+                print("=====✅ Merge completed. Output: \(resolvedOutputPath)")
+                print("=====🔊 Output file size: \(String(format: "%.2f", Double(outputSize) / 1024.0)) KB")
+
+                if outputSize == 0 {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Merged file is empty (0 bytes)"))
+                    return
+                }
+
+                let result = MergeResult(
+                    outputPath: resolvedOutputPath,
+                    duration: totalDuration,
+                    inputCount: Double(inputs.count)
+                )
+                promise.resolve(withResult: result)
             } catch {
                 promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
             }
@@ -1604,59 +1824,13 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
         return true
     }
 
-    private static func awaitLoadKeys(_ asset: AVURLAsset, keys: [String]) throws {
-        let sem = DispatchSemaphore(value: 0)
-        var loadError: NSError?
-        asset.loadValuesAsynchronously(forKeys: keys) {
-            for key in keys {
-                var err: NSError?
-                if asset.statusOfValue(forKey: key, error: &err) != .loaded {
-                    loadError = err ?? NSError(
-                        domain: "HybridSound",
-                        code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "Failed to load asset property: \(key)"]
-                    )
-                    break
-                }
-            }
-            sem.signal()
-        }
-        sem.wait()
-        if let e = loadError {
-            throw e
-        }
-    }
-
     private static func durationSeconds(of fileURL: URL) throws -> Double {
         let asset = AVURLAsset(url: fileURL)
-        try awaitLoadKeys(asset, keys: ["duration"])
-        var err: NSError?
-        guard asset.statusOfValue(forKey: "duration", error: &err) == .loaded else {
-            throw err ?? NSError(domain: "HybridSound", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"])
-        }
         let secs = CMTimeGetSeconds(asset.duration)
+        guard secs.isFinite, secs > 0 else {
+            throw NSError(domain: "HybridSound", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"])
+        }
         return secs
-    }
-
-    private static func audioTrackIsAAC(_ track: AVAssetTrack) -> Bool {
-        guard let descriptions = track.formatDescriptions as? [CMAudioFormatDescription] else {
-            return false
-        }
-        for desc in descriptions {
-            guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc) else { continue }
-            let fmt = asbd.pointee.mFormatID
-            switch fmt {
-            case kAudioFormatMPEG4AAC,
-                 kAudioFormatMPEG4AAC_HE,
-                 kAudioFormatMPEG4AAC_HE_V2,
-                 kAudioFormatMPEG4AAC_LD,
-                 kAudioFormatMPEG4AAC_ELD:
-                return true
-            default:
-                break
-            }
-        }
-        return false
     }
 
     // MARK: - Interruption Handling
@@ -1752,30 +1926,30 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
         
         switch type {
         case .began:
-            // Interruption began (e.g., phone call) - stop recording to save the audio.
+            // Interruption began (e.g., phone call, Siri, alarm).
             //
-            // The recording is stopped (not paused) because iOS does not guarantee
-            // that the audio session can be restored. The WAV file is finalized on disk
-            // and remains playable.
-            //
-            // Note: The callback sends isRecording=false with the current position,
-            // but does NOT include the file path. The JS side already knows the file
-            // path from the startRecorder() promise. If the file was auto-generated,
-            // callers should use restorePendingRecordings() after app restart to
-            // retrieve any interrupted recordings.
-            if let recorder = audioRecorder, recorder.isRecording {
+            // Finalize whenever audioRecorder exists — not only when isRecording.
+            // iOS may set isRecording = false before this handler runs (especially
+            // with short Siri invocations). Skipping finalization in that case
+            // leaves a stale AVAudioRecorder whose WAV header is never flushed,
+            // causing downstream merge / AAC-encode failures.
+            if let recorder = audioRecorder {
+                let wavPath = recorder.url.path
                 let currentTime = recorder.currentTime * 1000
-                
-                // Stop recording to save the audio
-                recorder.stop()
+
+                if recorder.isRecording {
+                    recorder.stop()
+                }
                 stopRecordTimer()
-                
-                // Clean up current recorder but keep session for potential resume
+
+                // Repair WAV header immediately so the file is always in a
+                // consistent state regardless of when/whether restore runs.
+                _ = repairWavFile(wavPath)
+
                 audioRecorder = nil
                 try? recordingSession?.setActive(false)
                 recordingSession = nil
-                
-                // Notify listener with interruption status
+
                 if let listener = recordBackListener {
                     listener(RecordBackType(
                         isRecording: false,
@@ -1784,6 +1958,8 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                         recordSecs: currentTime,
                     ))
                 }
+
+                print("🎙️ Interruption: recording finalized & WAV header repaired at \(wavPath)")
             }
         case .ended:
             break

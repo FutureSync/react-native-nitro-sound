@@ -295,6 +295,14 @@ namespace margelo::nitro::sound {
       auto __value = std::move(__result.value());
       return __value;
     }
+    inline std::shared_ptr<Promise<std::string>> resetRecordingState() override {
+      auto __result = _swiftPart.resetRecordingState();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
 
   private:
     NitroSound::HybridSoundSpec_cxx _swiftPart;

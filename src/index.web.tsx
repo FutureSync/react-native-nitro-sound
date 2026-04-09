@@ -353,6 +353,23 @@ class SoundWebImpl implements SoundType {
     throw new Error('validateAudio is not supported on Web platform.');
   }
 
+  async resetRecordingState(): Promise<string> {
+    this.stopRecordingProgress();
+    if (this.mediaRecorder) {
+      try {
+        this.mediaRecorder.stop();
+      } catch {}
+      this.mediaRecorder = null;
+    }
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((track) => track.stop());
+      this.mediaStream = null;
+    }
+    this.recordedChunks = [];
+    this.recordBackListener = null;
+    return 'Recorder reset';
+  }
+
   // Private helper methods
   private getMimeType(_audioSets?: AudioSet): string {
     // Try to use webm/opus for best browser support

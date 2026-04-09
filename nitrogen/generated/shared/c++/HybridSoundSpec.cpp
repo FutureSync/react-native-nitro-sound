@@ -39,6 +39,7 @@ namespace margelo::nitro::sound {
       prototype.registerHybridMethod("mergeAudioFiles", &HybridSoundSpec::mergeAudioFiles);
       prototype.registerHybridMethod("getAudioDuration", &HybridSoundSpec::getAudioDuration);
       prototype.registerHybridMethod("validateAudio", &HybridSoundSpec::validateAudio);
+      prototype.registerHybridMethod("resetRecordingState", &HybridSoundSpec::resetRecordingState);
     });
   }
 

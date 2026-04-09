@@ -160,6 +160,10 @@ abstract class HybridSoundSpec: HybridObject() {
   @DoNotStrip
   @Keep
   abstract fun validateAudio(filePath: String, minDurationSecs: Double?): Promise<AudioValidationResult>
+  
+  @DoNotStrip
+  @Keep
+  abstract fun resetRecordingState(): Promise<String>
 
   private external fun initHybrid(): HybridData
 

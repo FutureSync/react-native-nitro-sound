@@ -311,6 +311,32 @@ class HybridSound : HybridSoundSpec() {
         }
     }
 
+    override fun resetRecordingState(): Promise<String> {
+        return Promise.parallel {
+            try {
+                val service = RecordingForegroundService.getInstance()
+                service?.stopRecording()
+            } catch (e: Exception) {
+                Logger.d("resetRecordingState", "Stop during reset failed (safe to ignore): ${e.message}")
+            }
+
+            handler.post {
+                stopRecordTimer()
+                if (isServiceBound) {
+                    try {
+                        reactContext?.unbindService(serviceConnection)
+                    } catch (_: Exception) {}
+                    isServiceBound = false
+                }
+            }
+
+            currentRecordingPath = null
+            recordBackListener = null
+
+            "Recorder reset"
+        }
+    }
+
     override fun stopRecorder(): Promise<String> {
         val promise = Promise<String>()
 

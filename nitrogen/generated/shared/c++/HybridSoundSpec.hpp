@@ -98,6 +98,7 @@ namespace margelo::nitro::sound {
       virtual std::shared_ptr<Promise<MergeResult>> mergeAudioFiles(const std::vector<std::string>& filePaths, const std::optional<std::string>& outputPath) = 0;
       virtual std::shared_ptr<Promise<double>> getAudioDuration(const std::string& filePath) = 0;
       virtual std::shared_ptr<Promise<AudioValidationResult>> validateAudio(const std::string& filePath, std::optional<double> minDurationSecs) = 0;
+      virtual std::shared_ptr<Promise<std::string>> resetRecordingState() = 0;
 
     protected:
       // Hybrid Setup

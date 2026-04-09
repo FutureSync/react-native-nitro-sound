@@ -270,4 +270,16 @@ export interface Sound extends HybridObject<{
     filePath: string,
     minDurationSecs?: number
   ): Promise<AudioValidationResult>;
+
+  /**
+   * Reset the recorder to a clean state.
+   * Use this to recover from stuck states (e.g., after iOS call interruption
+   * where the native recorder was stopped but JS state is still "paused/recording").
+   *
+   * Stops any active recording, deactivates audio session, and clears all internal state.
+   * Safe to call even when no recording is active.
+   *
+   * @returns "Recorder reset" on success
+   */
+  resetRecordingState(): Promise<string>;
 }

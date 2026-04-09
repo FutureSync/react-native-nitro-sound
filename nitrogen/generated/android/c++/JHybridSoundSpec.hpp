@@ -79,6 +79,7 @@ namespace margelo::nitro::sound {
     std::shared_ptr<Promise<MergeResult>> mergeAudioFiles(const std::vector<std::string>& filePaths, const std::optional<std::string>& outputPath) override;
     std::shared_ptr<Promise<double>> getAudioDuration(const std::string& filePath) override;
     std::shared_ptr<Promise<AudioValidationResult>> validateAudio(const std::string& filePath, std::optional<double> minDurationSecs) override;
+    std::shared_ptr<Promise<std::string>> resetRecordingState() override;
 
   private:
     friend HybridBase;

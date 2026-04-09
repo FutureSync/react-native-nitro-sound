@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 import UIKit
 import NitroModules
 
@@ -454,10 +455,14 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                         switch conversionResult {
                         case .success(let outputPath, _):
                             let outputURL = URL(fileURLWithPath: outputPath)
-                            promise.resolve(withResult: outputURL.absoluteString)
+                            let resultPath = outputURL.absoluteString
+                            if resultPath.hasSuffix(".wav") {
+                                print("⚠️ [Sound] stopRecorder returning WAV file instead of M4A. Downstream consumers expecting M4A should handle this case.")
+                            }
+                            promise.resolve(withResult: resultPath)
                         case .error(let message):
-                            // If conversion fails, return the WAV file instead
                             if FileManager.default.fileExists(atPath: wavPath) {
+                                print("⚠️ [Sound] WAV→M4A conversion failed (\(message)). Returning WAV file: \(wavPath)")
                                 promise.resolve(withResult: wavURL.absoluteString)
                             } else {
                                 promise.reject(withError: RuntimeError.error(withMessage: "Recording failed: \(message)"))
@@ -827,8 +832,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                         restoredRecordings.append(recording)
                         
                     case .error(let message):
-                        print("🎙️ Failed to convert \(wavPath): \(message)")
-                        // If conversion fails, still return the WAV file
+                        print("⚠️ [Sound] WAV→M4A conversion failed for \(wavPath): \(message). Returning WAV file.")
                         if FileManager.default.fileExists(atPath: wavPath) {
                             let estimatedDuration = Self.estimateWavDuration(filePath: wavPath)
                             
@@ -895,7 +899,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 promise.resolve(withResult: recording)
                 
             case .error(let message):
-                // If conversion fails but WAV still exists, return WAV info
+                print("⚠️ [Sound] WAV→M4A conversion failed for \(wavFilePath): \(message). Returning WAV file.")
                 if FileManager.default.fileExists(atPath: wavFilePath) {
                     let wavURL = URL(fileURLWithPath: wavFilePath)
                     let estimatedDuration = Self.estimateWavDuration(filePath: wavFilePath)
@@ -1317,6 +1321,342 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
             )
             endListener(endEvent)
         }
+    }
+
+    // MARK: - Audio processing
+
+    public func mergeAudioFiles(filePaths: [String], outputPath: String?) throws -> Promise<MergeResult> {
+        let promise = Promise<MergeResult>()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                guard !filePaths.isEmpty else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "No input files to merge"))
+                    return
+                }
+
+                for raw in filePaths {
+                    let std = (raw as NSString).standardizingPath
+                    guard Self.validatePathSecurity(path: std) else {
+                        promise.reject(withError: RuntimeError.error(withMessage: "Access denied: an input path is outside allowed paths"))
+                        return
+                    }
+                    guard FileManager.default.fileExists(atPath: std) else {
+                        promise.reject(withError: RuntimeError.error(withMessage: "Input file not found: \(std)"))
+                        return
+                    }
+                }
+
+                let resolvedOutputURL: URL
+                if let out = outputPath {
+                    let stdOut = (out as NSString).standardizingPath
+                    guard Self.validatePathSecurity(path: stdOut) else {
+                        promise.reject(withError: RuntimeError.error(withMessage: "Access denied: output path is outside allowed paths"))
+                        return
+                    }
+                    resolvedOutputURL = URL(fileURLWithPath: stdOut)
+                } else {
+                    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                    let name = "merged_\(Int(Date().timeIntervalSince1970 * 1000)).m4a"
+                    resolvedOutputURL = docs.appendingPathComponent(name)
+                }
+
+                let parentDir = resolvedOutputURL.deletingLastPathComponent()
+                if !FileManager.default.fileExists(atPath: parentDir.path) {
+                    try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                }
+
+                var segments: [(AVURLAsset, AVAssetTrack)] = []
+                var allAAC = true
+
+                for raw in filePaths {
+                    let std = (raw as NSString).standardizingPath
+                    if std.lowercased().hasSuffix(".wav") {
+                        _ = self.repairWavFile(std)
+                    }
+
+                    let fileURL = URL(fileURLWithPath: std)
+                    let asset = AVURLAsset(url: fileURL)
+                    try Self.awaitLoadKeys(asset, keys: ["tracks", "duration"])
+
+                    let audioTracks = asset.tracks(withMediaType: .audio)
+                    guard let audioTrack = audioTracks.first else {
+                        print("⚠️ [Sound] mergeAudioFiles: skipping file with no audio tracks: \(std)")
+                        continue
+                    }
+
+                    if !Self.audioTrackIsAAC(audioTrack) {
+                        allAAC = false
+                    }
+
+                    segments.append((asset, audioTrack))
+                }
+
+                guard !segments.isEmpty else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "No audio tracks found in input files"))
+                    return
+                }
+
+                let composition = AVMutableComposition()
+                guard let compositionTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create composition track"))
+                    return
+                }
+
+                var insertAt = CMTime.zero
+                for (asset, audioTrack) in segments {
+                    let duration = asset.duration
+                    let range = CMTimeRange(start: .zero, duration: duration)
+                    try compositionTrack.insertTimeRange(range, of: audioTrack, at: insertAt)
+                    insertAt = CMTimeAdd(insertAt, duration)
+                }
+
+                let preset = allAAC ? AVAssetExportPresetPassthrough : AVAssetExportPresetAppleM4A
+                guard let exportSession = AVAssetExportSession(asset: composition, presetName: preset) else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create export session"))
+                    return
+                }
+
+                if FileManager.default.fileExists(atPath: resolvedOutputURL.path) {
+                    try FileManager.default.removeItem(at: resolvedOutputURL)
+                }
+
+                exportSession.outputURL = resolvedOutputURL
+                exportSession.outputFileType = .m4a
+                exportSession.shouldOptimizeForNetworkUse = false
+
+                exportSession.exportAsynchronously {
+                    switch exportSession.status {
+                    case .completed:
+                        guard FileManager.default.fileExists(atPath: resolvedOutputURL.path) else {
+                            promise.reject(withError: RuntimeError.error(withMessage: "Merged file was not written"))
+                            return
+                        }
+                        do {
+                            let durationSecs = try Self.durationSeconds(of: resolvedOutputURL)
+                            let result = MergeResult(
+                                outputPath: resolvedOutputURL.path,
+                                duration: durationSecs,
+                                inputCount: Double(segments.count)
+                            )
+                            promise.resolve(withResult: result)
+                        } catch {
+                            promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
+                        }
+                    case .failed, .cancelled:
+                        let msg = exportSession.error?.localizedDescription ?? "Export failed"
+                        promise.reject(withError: RuntimeError.error(withMessage: msg))
+                    default:
+                        promise.reject(withError: RuntimeError.error(withMessage: "Unexpected export status"))
+                    }
+                }
+            } catch {
+                promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
+            }
+        }
+
+        return promise
+    }
+
+    public func getAudioDuration(filePath: String) throws -> Promise<Double> {
+        let promise = Promise<Double>()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let std = (filePath as NSString).standardizingPath
+            guard Self.validatePathSecurity(path: std) else {
+                promise.reject(withError: RuntimeError.error(withMessage: "Access denied: file path is outside allowed paths"))
+                return
+            }
+            guard FileManager.default.fileExists(atPath: std) else {
+                promise.reject(withError: RuntimeError.error(withMessage: "File not found: \(std)"))
+                return
+            }
+
+            let url = URL(fileURLWithPath: std)
+            do {
+                let secs = try Self.durationSeconds(of: url)
+                guard secs.isFinite, secs > 0 else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Invalid or zero duration"))
+                    return
+                }
+                promise.resolve(withResult: secs)
+            } catch {
+                promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
+            }
+        }
+
+        return promise
+    }
+
+    public func validateAudio(filePath: String, minDurationSecs: Double?) throws -> Promise<AudioValidationResult> {
+        let promise = Promise<AudioValidationResult>()
+        let minimum = minDurationSecs ?? 1.0
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let std = (filePath as NSString).standardizingPath
+
+            guard FileManager.default.fileExists(atPath: std) else {
+                let r = AudioValidationResult(isValid: false, duration: 0, fileSize: 0, error: "File not found")
+                promise.resolve(withResult: r)
+                return
+            }
+
+            let attrs = try? FileManager.default.attributesOfItem(atPath: std)
+            let fileSize = Double((attrs?[.size] as? NSNumber)?.int64Value ?? 0)
+
+            guard fileSize >= 1024 else {
+                let r = AudioValidationResult(isValid: false, duration: 0, fileSize: fileSize, error: "File too small")
+                promise.resolve(withResult: r)
+                return
+            }
+
+            guard Self.validatePathSecurity(path: std) else {
+                let r = AudioValidationResult(isValid: false, duration: 0, fileSize: fileSize, error: "Access denied: file path is outside allowed paths")
+                promise.resolve(withResult: r)
+                return
+            }
+
+            let url = URL(fileURLWithPath: std)
+            do {
+                let secs = try Self.durationSeconds(of: url)
+                guard secs.isFinite, secs > 0 else {
+                    let r = AudioValidationResult(isValid: false, duration: 0, fileSize: fileSize, error: "Cannot determine duration")
+                    promise.resolve(withResult: r)
+                    return
+                }
+                if secs < minimum {
+                    let r = AudioValidationResult(isValid: false, duration: secs, fileSize: fileSize, error: "Duration too short")
+                    promise.resolve(withResult: r)
+                    return
+                }
+                let r = AudioValidationResult(isValid: true, duration: secs, fileSize: fileSize, error: nil)
+                promise.resolve(withResult: r)
+            } catch {
+                let r = AudioValidationResult(isValid: false, duration: 0, fileSize: fileSize, error: "Cannot determine duration")
+                promise.resolve(withResult: r)
+            }
+        }
+
+        return promise
+    }
+
+    /// Repairs RIFF/WAVE header sizes and the `data` chunk size (searches for the `data` subchunk).
+    private func repairWavFile(_ filePath: String) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let fileSize = attrs[.size] as? Int64,
+              fileSize >= 44 else {
+            return false
+        }
+
+        let url = URL(fileURLWithPath: filePath)
+        guard let handle = try? FileHandle(forUpdating: url) else {
+            return false
+        }
+        defer { try? handle.close() }
+
+        let riffHeader = handle.readData(ofLength: 12)
+        guard riffHeader.count == 12,
+              String(data: riffHeader.subdata(in: 0..<4), encoding: .ascii) == "RIFF",
+              String(data: riffHeader.subdata(in: 8..<12), encoding: .ascii) == "WAVE" else {
+            return false
+        }
+
+        var offset: Int64 = 12
+        var dataChunkOffset: Int64?
+
+        while offset + 8 <= fileSize {
+            handle.seek(toFileOffset: UInt64(offset))
+            let idData = handle.readData(ofLength: 4)
+            let sizeData = handle.readData(ofLength: 4)
+            guard idData.count == 4, sizeData.count == 4 else {
+                return false
+            }
+            let chunkId = String(data: idData, encoding: .ascii) ?? ""
+            let chunkSizeLE = sizeData.withUnsafeBytes { (buf: UnsafeRawBufferPointer) -> UInt32 in
+                guard buf.count >= 4 else { return 0 }
+                return buf.load(as: UInt32.self)
+            }
+            let body = Int64(chunkSizeLE)
+            if chunkId == "data" {
+                dataChunkOffset = offset
+                break
+            }
+            let padded = body + (body & 1)
+            offset += 8 + padded
+        }
+
+        guard let dataOffset = dataChunkOffset else {
+            return false
+        }
+
+        let riffChunkSize = UInt32(truncatingIfNeeded: fileSize - 8)
+        let dataPayloadSize = UInt32(truncatingIfNeeded: fileSize - dataOffset - 8)
+
+        var leRiff = riffChunkSize.littleEndian
+        var leData = dataPayloadSize.littleEndian
+
+        handle.seek(toFileOffset: 4)
+        withUnsafeBytes(of: &leRiff) { handle.write(Data($0)) }
+
+        handle.seek(toFileOffset: UInt64(dataOffset + 4))
+        withUnsafeBytes(of: &leData) { handle.write(Data($0)) }
+
+        return true
+    }
+
+    private static func awaitLoadKeys(_ asset: AVURLAsset, keys: [String]) throws {
+        let sem = DispatchSemaphore(value: 0)
+        var loadError: NSError?
+        asset.loadValuesAsynchronously(forKeys: keys) {
+            for key in keys {
+                var err: NSError?
+                if asset.statusOfValue(forKey: key, error: &err) != .loaded {
+                    loadError = err ?? NSError(
+                        domain: "HybridSound",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to load asset property: \(key)"]
+                    )
+                    break
+                }
+            }
+            sem.signal()
+        }
+        sem.wait()
+        if let e = loadError {
+            throw e
+        }
+    }
+
+    private static func durationSeconds(of fileURL: URL) throws -> Double {
+        let asset = AVURLAsset(url: fileURL)
+        try awaitLoadKeys(asset, keys: ["duration"])
+        var err: NSError?
+        guard asset.statusOfValue(forKey: "duration", error: &err) == .loaded else {
+            throw err ?? NSError(domain: "HybridSound", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to load duration"])
+        }
+        let secs = CMTimeGetSeconds(asset.duration)
+        return secs
+    }
+
+    private static func audioTrackIsAAC(_ track: AVAssetTrack) -> Bool {
+        guard let descriptions = track.formatDescriptions as? [CMAudioFormatDescription] else {
+            return false
+        }
+        for desc in descriptions {
+            guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc) else { continue }
+            let fmt = asbd.pointee.mFormatID
+            switch fmt {
+            case kAudioFormatMPEG4AAC,
+                 kAudioFormatMPEG4AAC_HE,
+                 kAudioFormatMPEG4AAC_HE_V2,
+                 kAudioFormatMPEG4AAC_LD,
+                 kAudioFormatMPEG4AAC_ELD:
+                return true
+            default:
+                break
+            }
+        }
+        return false
     }
 
     // MARK: - Interruption Handling

@@ -5,6 +5,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.media.AudioManager
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
+import android.media.MediaMuxer
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
@@ -348,12 +353,15 @@ class HybridSound : HybridSoundSpec() {
                 when (conversionResult) {
                     is WavToM4aConverter.ConversionResult.Success -> {
                         val fileUri = Uri.fromFile(File(conversionResult.outputPath)).toString()
+                        if (fileUri.endsWith(".wav")) {
+                            Logger.w("[Sound] stopRecorder returning WAV file instead of M4A. Downstream consumers expecting M4A should handle this case.")
+                        }
                         promise.resolve(fileUri)
                     }
                     is WavToM4aConverter.ConversionResult.Error -> {
-                        // If conversion fails, return the WAV file instead
                         val wavFile = File(wavPath)
                         if (wavFile.exists()) {
+                            Logger.w("[Sound] WAV→M4A conversion failed (${conversionResult.message}). Returning WAV file: $wavPath")
                             val fileUri = Uri.fromFile(wavFile).toString()
                             promise.resolve(fileUri)
                         } else {
@@ -710,7 +718,7 @@ class HybridSound : HybridSoundSpec() {
                                 )
                             }
                             is WavToM4aConverter.ConversionResult.Error -> {
-                                // If conversion fails, still return the WAV file
+                                Logger.w("[Sound] WAV→M4A conversion failed for $wavPath: ${result.message}. Returning WAV file.")
                                 if (wavFile.exists()) {
                                     val fileUri = Uri.fromFile(wavFile).toString()
                                     val estimatedDuration = estimateWavDuration(wavPath)
@@ -787,7 +795,7 @@ class HybridSound : HybridSoundSpec() {
                         )
                     }
                     is WavToM4aConverter.ConversionResult.Error -> {
-                        // If conversion fails but WAV still exists, return WAV info
+                        Logger.w("[Sound] WAV→M4A conversion failed for $wavFilePath: ${result.message}. Returning WAV file.")
                         if (wavFile.exists()) {
                             val fileUri = Uri.fromFile(wavFile).toString()
                             val estimatedDuration = estimateWavDuration(wavFilePath)
@@ -808,6 +816,208 @@ class HybridSound : HybridSoundSpec() {
             }
         }
         
+        return promise
+    }
+
+    override fun mergeAudioFiles(filePaths: Array<String>, outputPath: String?): Promise<MergeResult> {
+        val promise = Promise<MergeResult>()
+
+        CoroutineScope(Dispatchers.IO).launch {
+            val tempFilesToDelete = mutableListOf<File>()
+            try {
+                if (filePaths.isEmpty()) {
+                    promise.reject(Exception("No input files"))
+                    return@launch
+                }
+
+                val resolvedOut = outputPath?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: File(context.filesDir, "merged_${System.currentTimeMillis()}.m4a").absolutePath
+
+                if (resolvedOut.isNotEmpty() && !validatePathSecurity(resolvedOut)) {
+                    promise.reject(Exception("Access denied: output path is outside allowed paths"))
+                    return@launch
+                }
+
+                val segmentPaths = mutableListOf<String>()
+
+                for ((index, rawPath) in filePaths.withIndex()) {
+                    if (!validatePathSecurity(rawPath)) {
+                        promise.reject(Exception("Access denied: input path is outside allowed paths: $rawPath"))
+                        return@launch
+                    }
+
+                    val inputFile = File(rawPath)
+                    if (!inputFile.exists()) {
+                        promise.reject(Exception("File not found: $rawPath"))
+                        return@launch
+                    }
+
+                    if (rawPath.endsWith(".wav", ignoreCase = true)) {
+                        WavRecorder.repairWavFile(rawPath)
+                        val tempM4a = File(context.cacheDir, "merge_seg_${System.currentTimeMillis()}_$index.m4a")
+                        tempFilesToDelete.add(tempM4a)
+
+                        when (
+                            val conv = WavToM4aConverter.convertSync(
+                                wavFilePath = rawPath,
+                                m4aFilePath = tempM4a.absolutePath,
+                                deleteWavAfterConversion = false
+                            )
+                        ) {
+                            is WavToM4aConverter.ConversionResult.Success ->
+                                segmentPaths.add(conv.outputPath)
+                            is WavToM4aConverter.ConversionResult.Error -> {
+                                promise.reject(Exception("Failed to convert WAV: $rawPath — ${conv.message}"))
+                                return@launch
+                            }
+                        }
+                    } else {
+                        if (!hasAudioTrack(rawPath)) {
+                            continue
+                        }
+                        segmentPaths.add(rawPath)
+                    }
+                }
+
+                if (segmentPaths.isEmpty()) {
+                    promise.reject(Exception("No audio tracks in inputs"))
+                    return@launch
+                }
+
+                File(resolvedOut).parentFile?.mkdirs()
+                concatenateM4aFiles(segmentPaths, resolvedOut)
+
+                val outFile = File(resolvedOut)
+                if (!outFile.exists() || outFile.length() == 0L) {
+                    promise.reject(Exception("Merge failed: output file missing or empty"))
+                    return@launch
+                }
+
+                val durationSec = getAudioDurationSecondsOrThrow(resolvedOut)
+                promise.resolve(
+                    MergeResult(
+                        outputPath = resolvedOut,
+                        duration = durationSec,
+                        inputCount = filePaths.size.toDouble()
+                    )
+                )
+            } catch (e: Exception) {
+                promise.reject(e)
+            } finally {
+                for (f in tempFilesToDelete) {
+                    try {
+                        if (f.exists()) f.delete()
+                    } catch (_: Exception) {
+                        // ignore
+                    }
+                }
+            }
+        }
+
+        return promise
+    }
+
+    override fun getAudioDuration(filePath: String): Promise<Double> {
+        val promise = Promise<Double>()
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val duration = getAudioDurationSecondsOrThrow(filePath)
+                promise.resolve(duration)
+            } catch (e: Exception) {
+                promise.reject(e)
+            }
+        }
+
+        return promise
+    }
+
+    override fun validateAudio(filePath: String, minDurationSecs: Double?): Promise<AudioValidationResult> {
+        val promise = Promise<AudioValidationResult>()
+        val minSec = minDurationSecs ?: 1.0
+
+        CoroutineScope(Dispatchers.IO).launch {
+            val file = File(filePath)
+            if (!file.exists()) {
+                promise.resolve(
+                    AudioValidationResult(
+                        isValid = false,
+                        duration = 0.0,
+                        fileSize = 0.0,
+                        error = "File not found"
+                    )
+                )
+                return@launch
+            }
+
+            val fileSize = file.length().toDouble()
+            if (fileSize < 1024) {
+                promise.resolve(
+                    AudioValidationResult(
+                        isValid = false,
+                        duration = 0.0,
+                        fileSize = fileSize,
+                        error = "File too small"
+                    )
+                )
+                return@launch
+            }
+
+            try {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(filePath)
+                    val ms = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+                    if (ms == null || ms <= 0L) {
+                        promise.resolve(
+                            AudioValidationResult(
+                                isValid = false,
+                                duration = 0.0,
+                                fileSize = fileSize,
+                                error = "Cannot determine duration"
+                            )
+                        )
+                        return@launch
+                    }
+                    val durationSec = ms / 1000.0
+                    if (durationSec < minSec) {
+                        promise.resolve(
+                            AudioValidationResult(
+                                isValid = false,
+                                duration = durationSec,
+                                fileSize = fileSize,
+                                error = "Duration too short"
+                            )
+                        )
+                        return@launch
+                    }
+                    promise.resolve(
+                        AudioValidationResult(
+                            isValid = true,
+                            duration = durationSec,
+                            fileSize = fileSize,
+                            error = null
+                        )
+                    )
+                } finally {
+                    try {
+                        retriever.release()
+                    } catch (_: Exception) {
+                        // ignore
+                    }
+                }
+            } catch (_: Exception) {
+                promise.resolve(
+                    AudioValidationResult(
+                        isValid = false,
+                        duration = 0.0,
+                        fileSize = fileSize,
+                        error = "Cannot determine duration"
+                    )
+                )
+            }
+        }
+
         return promise
     }
 
@@ -914,6 +1124,170 @@ class HybridSound : HybridSoundSpec() {
         ).filterNotNull()
         
         return allowedDirs.any { canonicalPath.startsWith(it) }
+    }
+
+    private fun hasAudioTrack(filePath: String): Boolean {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(filePath)
+            for (i in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) return true
+            }
+            false
+        } catch (_: Exception) {
+            false
+        } finally {
+            try {
+                extractor.release()
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    private fun isAudioFormatCompatible(ref: MediaFormat, other: MediaFormat): Boolean {
+        val mimeA = ref.getString(MediaFormat.KEY_MIME) ?: return false
+        val mimeB = other.getString(MediaFormat.KEY_MIME) ?: return false
+        if (mimeA != mimeB) return false
+        if (ref.containsKey(MediaFormat.KEY_SAMPLE_RATE) && other.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+            if (ref.getInteger(MediaFormat.KEY_SAMPLE_RATE) != other.getInteger(MediaFormat.KEY_SAMPLE_RATE)) {
+                return false
+            }
+        }
+        if (ref.containsKey(MediaFormat.KEY_CHANNEL_COUNT) && other.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+            if (ref.getInteger(MediaFormat.KEY_CHANNEL_COUNT) != other.getInteger(MediaFormat.KEY_CHANNEL_COUNT)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * Concatenates AAC/M4A segments with identical audio format (mime, sample rate, channels).
+     * WAV inputs must be converted to M4A before calling this.
+     */
+    private fun concatenateM4aFiles(segmentPaths: List<String>, outputPath: String) {
+        if (segmentPaths.isEmpty()) throw Exception("No segments to merge")
+
+        val outFile = File(outputPath)
+        outFile.parentFile?.mkdirs()
+        if (outFile.exists()) {
+            outFile.delete()
+        }
+
+        var muxer: MediaMuxer? = null
+        var muxerStarted = false
+        var muxerTrackIndex = -1
+        var cumulativeOffsetUs = 0L
+        var referenceFormat: MediaFormat? = null
+
+        try {
+            val muxerInstance = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = muxerInstance
+
+            for ((segmentIndex, path) in segmentPaths.withIndex()) {
+                val extractor = MediaExtractor()
+                extractor.setDataSource(path)
+
+                var audioTrackIndex = -1
+                var trackFormat: MediaFormat? = null
+                for (i in 0 until extractor.trackCount) {
+                    val f = extractor.getTrackFormat(i)
+                    val mime = f.getString(MediaFormat.KEY_MIME) ?: continue
+                    if (mime.startsWith("audio/")) {
+                        audioTrackIndex = i
+                        trackFormat = f
+                        break
+                    }
+                }
+
+                if (audioTrackIndex < 0 || trackFormat == null) {
+                    extractor.release()
+                    throw Exception("No audio track in: $path")
+                }
+
+                if (segmentIndex == 0) {
+                    referenceFormat = trackFormat
+                    muxerTrackIndex = muxerInstance.addTrack(trackFormat)
+                    muxerInstance.start()
+                    muxerStarted = true
+                } else {
+                    if (!isAudioFormatCompatible(referenceFormat!!, trackFormat)) {
+                        extractor.release()
+                        throw Exception("Incompatible audio: sample rate or channels differ between inputs")
+                    }
+                }
+
+                extractor.selectTrack(audioTrackIndex)
+
+                val bufferSize = if (trackFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                    maxOf(64 * 1024, trackFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE))
+                } else {
+                    256 * 1024
+                }
+                val buffer = ByteBuffer.allocate(bufferSize)
+
+                var segmentMaxPtsUs = 0L
+
+                while (true) {
+                    buffer.clear()
+                    val sampleSize = extractor.readSampleData(buffer, 0)
+                    if (sampleSize < 0) break
+
+                    buffer.position(0)
+                    buffer.limit(sampleSize)
+
+                    val adjustedPts = extractor.sampleTime + cumulativeOffsetUs
+
+                    val bufferInfo = MediaCodec.BufferInfo()
+                    bufferInfo.offset = 0
+                    bufferInfo.size = sampleSize
+                    bufferInfo.presentationTimeUs = adjustedPts
+                    bufferInfo.flags = extractor.sampleFlags
+
+                    muxerInstance.writeSampleData(muxerTrackIndex, buffer, bufferInfo)
+                    segmentMaxPtsUs = maxOf(segmentMaxPtsUs, adjustedPts)
+
+                    if (!extractor.advance()) break
+                }
+
+                cumulativeOffsetUs = segmentMaxPtsUs + 1000L
+
+                extractor.release()
+            }
+        } finally {
+            if (muxerStarted) {
+                try {
+                    muxer?.stop()
+                } catch (_: Exception) {
+                    // ignore
+                }
+            }
+            try {
+                muxer?.release()
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    private fun getAudioDurationSecondsOrThrow(filePath: String): Double {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(filePath)
+            val ms = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            if (ms == null || ms <= 0L) {
+                throw Exception("Cannot determine duration")
+            }
+            return ms / 1000.0
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
     }
     
     private fun startPlayTimer() {

@@ -5,6 +5,8 @@ import type {
   PlayBackType,
   PlaybackEndType,
   RestoredRecording,
+  MergeResult,
+  AudioValidationResult,
 } from './specs/Sound.nitro';
 
 export * from './specs/Sound.nitro';
@@ -330,11 +332,25 @@ class SoundWebImpl implements SoundType {
   }
 
   async restoreRecording(_wavFilePath: string): Promise<RestoredRecording> {
-    // Web recordings are stored in memory (Blob URLs) and are lost on page refresh
-    // There's no persistent storage to recover from
-    throw new Error(
-      'restoreRecording is not supported on Web platform. Web recordings are stored in memory and lost on page refresh.'
-    );
+    throw new Error('restoreRecording is not supported on Web platform.');
+  }
+
+  async mergeAudioFiles(
+    _filePaths: string[],
+    _outputPath?: string
+  ): Promise<MergeResult> {
+    throw new Error('mergeAudioFiles is not supported on Web platform.');
+  }
+
+  async getAudioDuration(_filePath: string): Promise<number> {
+    throw new Error('getAudioDuration is not supported on Web platform.');
+  }
+
+  async validateAudio(
+    _filePath: string,
+    _minDurationSecs?: number
+  ): Promise<AudioValidationResult> {
+    throw new Error('validateAudio is not supported on Web platform.');
   }
 
   // Private helper methods

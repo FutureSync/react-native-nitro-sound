@@ -142,6 +142,26 @@ export interface RestoredRecording {
   originalPath: string;
 }
 
+export interface AudioValidationResult {
+  /** Whether the audio file is valid for upload */
+  isValid: boolean;
+  /** Duration in seconds (0 if invalid) */
+  duration: number;
+  /** File size in bytes */
+  fileSize: number;
+  /** Error message if invalid */
+  error?: string;
+}
+
+export interface MergeResult {
+  /** Path to the merged M4A file */
+  outputPath: string;
+  /** Duration in seconds */
+  duration: number;
+  /** Number of input files merged */
+  inputCount: number;
+}
+
 export type RecordBackListener = (recordingMeta: RecordBackType) => void;
 export type PlayBackListener = (playbackMeta: PlayBackType) => void;
 export type PlaybackEndListener = (playbackEndMeta: PlaybackEndType) => void;
@@ -210,4 +230,44 @@ export interface Sound extends HybridObject<{
    * @throws Error if file doesn't exist or conversion fails
    */
   restoreRecording(wavFilePath: string): Promise<RestoredRecording>;
+
+  // Audio processing methods
+
+  /**
+   * Merge multiple audio files (WAV/M4A) into a single M4A.
+   * - Repairs WAV headers before merge (iOS + Android)
+   * - Validates output duration vs input durations
+   * - Does NOT delete input files — caller decides when to delete
+   *
+   * @param filePaths Array of audio file paths to merge
+   * @param outputPath Optional output path. If not provided, generates one in Documents.
+   * @returns MergeResult with output path, duration, and input count
+   */
+  mergeAudioFiles(
+    filePaths: string[],
+    outputPath?: string
+  ): Promise<MergeResult>;
+
+  /**
+   * Get duration of an audio file in seconds.
+   * Works with WAV, M4A, and other formats supported by the platform.
+   *
+   * @param filePath Path to the audio file
+   * @returns Duration in seconds
+   * @throws Error if file is invalid or unreadable
+   */
+  getAudioDuration(filePath: string): Promise<number>;
+
+  /**
+   * Validate an audio file for upload readiness.
+   * Checks: file exists, minimum size (1KB), decodable by native APIs, duration >= minDuration.
+   *
+   * @param filePath Path to the audio file
+   * @param minDurationSecs Minimum acceptable duration in seconds (default: 1.0)
+   * @returns AudioValidationResult with isValid, duration, fileSize, and optional error
+   */
+  validateAudio(
+    filePath: string,
+    minDurationSecs?: number
+  ): Promise<AudioValidationResult>;
 }

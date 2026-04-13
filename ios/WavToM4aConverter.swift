@@ -59,7 +59,7 @@ class WavToM4aConverter {
         do {
             try session.setCategory(.playback, mode: .default)
             try session.setActive(true)
-            print("🎵 [WavToM4a] Audio session activated for AAC encoding")
+            print("[WavToM4a] Audio session activated for AAC encoding")
         } catch {
             print("⚠️ [WavToM4a] Could not activate audio session for encoding: \(error)")
         }
@@ -100,7 +100,9 @@ class WavToM4aConverter {
             try? FileManager.default.removeItem(atPath: outputPath)
         }
         
-        print("🎵 [WavToM4a] Converting: \(wavFilePath) -> \(outputPath)")
+        let inputAttrs = try? FileManager.default.attributesOfItem(atPath: wavFilePath)
+        let inputSize = (inputAttrs?[.size] as? UInt64) ?? 0
+        print("[WavToM4a] Converting: \(wavFilePath.components(separatedBy: "/").last ?? wavFilePath) (\(inputSize)B) → \(outputPath.components(separatedBy: "/").last ?? outputPath)")
         
         // Create asset from WAV file
         let asset = AVAsset(url: wavURL)
@@ -170,7 +172,7 @@ class WavToM4aConverter {
         let sampleRate = sourceFormat.mSampleRate
         let channels = sourceFormat.mChannelsPerFrame
         
-        print("🎵 [WavToM4a] Source: \(sampleRate)Hz, \(channels)ch")
+        print("[WavToM4a] Source: \(sampleRate)Hz, \(channels)ch, bitRate=\(bitRate)")
         
         // Setup asset reader
         guard let reader = try? AVAssetReader(asset: asset) else {
@@ -245,16 +247,25 @@ class WavToM4aConverter {
         let semaphore = DispatchSemaphore(value: 0)
         var conversionError: String? = nil
         
+        var samplesWritten = 0
         writerInput.requestMediaDataWhenReady(on: queue) {
             while writerInput.isReadyForMoreMediaData {
                 if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
-                    writerInput.append(sampleBuffer)
+                    if !writerInput.append(sampleBuffer) {
+                        conversionError = "Encode failed after \(samplesWritten) samples: \(writer.error?.localizedDescription ?? "encoder unavailable")"
+                        print("[WavToM4a] append() FAILED at sample \(samplesWritten): \(writer.error?.localizedDescription ?? "encoder unavailable")")
+                        semaphore.signal()
+                        return
+                    }
+                    samplesWritten += 1
                 } else {
-                    // No more samples
                     writerInput.markAsFinished()
                     
                     if reader.status == .failed {
                         conversionError = "Reader failed: \(reader.error?.localizedDescription ?? "unknown")"
+                        print("[WavToM4a] Reader FAILED: \(reader.error?.localizedDescription ?? "unknown")")
+                    } else {
+                        print("[WavToM4a] Encoding done, \(samplesWritten) sample buffers written")
                     }
                     
                     semaphore.signal()
@@ -266,22 +277,22 @@ class WavToM4aConverter {
         // Wait for conversion to complete
         semaphore.wait()
         
-        // Check for errors
         if let error = conversionError {
+            print("[WavToM4a] FAILED: \(error)")
             writer.cancelWriting()
             return .error(message: error)
         }
         
-        // Finish writing
         let finishSemaphore = DispatchSemaphore(value: 0)
         writer.finishWriting {
             finishSemaphore.signal()
         }
         finishSemaphore.wait()
         
-        // Check writer status
         if writer.status == .failed {
-            return .error(message: "Writer failed: \(writer.error?.localizedDescription ?? "unknown")")
+            let writerErr = writer.error?.localizedDescription ?? "unknown"
+            print("[WavToM4a] Writer finishWriting FAILED: \(writerErr)")
+            return .error(message: "Writer failed: \(writerErr)")
         }
         
         // Get duration from source asset (already loaded above)
@@ -296,13 +307,13 @@ class WavToM4aConverter {
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: outputPath)
             let fileSize = attributes[.size] as? Int64 ?? 0
-            print("🎵 [WavToM4a] Conversion successful: \(fileSize) bytes, \(duration)s")
+            print("[WavToM4a] OK: output=\(fileSize)B, duration=\(String(format: "%.2f", duration))s")
             
             if fileSize == 0 {
                 return .error(message: "Output file is empty (0 bytes)")
             }
         } catch {
-            print("🎵 [WavToM4a] Could not get file attributes: \(error)")
+            print("[WavToM4a] WARN: Could not get file attributes: \(error)")
         }
         
         // Validate M4A duration matches source WAV duration
@@ -325,7 +336,7 @@ class WavToM4aConverter {
             
             let durationDiff: Double = Swift.abs(outputDuration - duration)
             if durationDiff > tolerance {
-                print("🎵 [WavToM4a] Duration mismatch: source=\(duration)s, output=\(outputDuration)s, tolerance=\(tolerance)s. Keeping WAV file.")
+                print("[WavToM4a] WARN: Duration mismatch src=\(String(format: "%.2f", duration))s vs out=\(String(format: "%.2f", outputDuration))s, keeping WAV")
                 // Return success with M4A path but do NOT delete WAV
                 return .success(outputPath: outputPath, duration: duration)
             }
@@ -335,9 +346,9 @@ class WavToM4aConverter {
         if deleteWavAfterConversion {
             do {
                 try FileManager.default.removeItem(atPath: wavFilePath)
-                print("🎵 [WavToM4a] Deleted original WAV file")
+                print("[WavToM4a] Deleted source WAV")
             } catch {
-                print("🎵 [WavToM4a] Failed to delete WAV file: \(error)")
+                print("[WavToM4a] WARN: Failed to delete WAV file: \(error)")
             }
         }
         

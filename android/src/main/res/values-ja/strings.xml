@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nitrosound_notification_channel_name">音声録音</string>
+    <string name="nitrosound_notification_channel_description">音声録音中であることを示します。</string>
+    <string name="nitrosound_notification_title_recording">録音中</string>
+    <string name="nitrosound_notification_title_paused">録音を一時停止しました</string>
+    <string name="nitrosound_notification_text_recording">タップしてアプリに戻る</string>
+    <string name="nitrosound_notification_text_paused">タップして録音を再開または停止</string>
+    <string name="nitrosound_notification_action_open">レコーダーを開く</string>
+</resources>

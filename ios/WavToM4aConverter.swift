@@ -54,15 +54,27 @@ class WavToM4aConverter {
     /// After an interruption (Siri, phone call) iOS reclaims hardware resources;
     /// re-activating the session before creating the AVAssetWriter prevents
     /// "encoder not found" / -16976 failures.
-    private static func ensureAudioSessionForEncoding() {
+    /// Returns false if activation fails after all retries — caller should abort.
+    private static func ensureAudioSessionForEncoding() -> Bool {
         let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .default)
-            try session.setActive(true)
-            print("[WavToM4a] Audio session activated for AAC encoding")
-        } catch {
-            print("⚠️ [WavToM4a] Could not activate audio session for encoding: \(error)")
+
+        // Deactivate first to signal other apps to yield audio resources
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+
+        let retryDelays: [UInt32] = [100_000, 300_000, 500_000] // microseconds
+        for (attempt, delay) in retryDelays.enumerated() {
+            do {
+                try session.setCategory(.playback, mode: .default)
+                try session.setActive(true)
+                print("[WavToM4a] Audio session activated (attempt \(attempt + 1))")
+                return true
+            } catch {
+                print("[WavToM4a] Session activation attempt \(attempt + 1) failed: \(error)")
+                usleep(delay)
+            }
         }
+        print("[WavToM4a] Audio session activation failed after all retries")
+        return false
     }
 
     /**
@@ -76,7 +88,9 @@ class WavToM4aConverter {
     ) -> ConversionResult {
         // Activate audio session to ensure hardware AAC encoder is available
         // (critical after Siri / phone call interruptions)
-        ensureAudioSessionForEncoding()
+        guard ensureAudioSessionForEncoding() else {
+            return .error(message: "Audio session unavailable - hardware AAC encoder cannot be accessed (phone call or Siri may be active)")
+        }
 
         let wavURL = URL(fileURLWithPath: wavFilePath)
         
@@ -107,60 +121,17 @@ class WavToM4aConverter {
         // Create asset from WAV file
         let asset = AVAsset(url: wavURL)
         
-        // Load audio tracks and format info
-        // Use async load API on iOS 16+ to avoid deprecation warnings;
-        // fall back to synchronous API on older versions.
-        var audioTrack: AVAssetTrack?
-        var assetDurationValue: CMTime = .zero
-        
-        if #available(iOS 16.0, *) {
-            let semaphore = DispatchSemaphore(value: 0)
-            var loadError: Error?
-            
-            Task {
-                do {
-                    let tracks = try await asset.loadTracks(withMediaType: .audio)
-                    audioTrack = tracks.first
-                    assetDurationValue = try await asset.load(.duration)
-                } catch {
-                    loadError = error
-                }
-                semaphore.signal()
-            }
-            semaphore.wait()
-            
-            if let error = loadError {
-                return .error(message: "Failed to load asset: \(error.localizedDescription)")
-            }
-        } else {
-            // Fallback for iOS < 16
-            audioTrack = asset.tracks(withMediaType: .audio).first
-            assetDurationValue = asset.duration
-        }
+        // Load audio tracks and format info (sync API — safe on all iOS versions,
+        // avoids Task+semaphore deadlock on cooperative thread pool)
+        let audioTrack = asset.tracks(withMediaType: .audio).first
+        let assetDurationValue = asset.duration
         
         guard let track = audioTrack else {
             return .error(message: "No audio track found in WAV file")
         }
         
-        // Get source format description
-        let formatDescriptions: [CMFormatDescription]
-        if #available(iOS 16.0, *) {
-            let semaphore = DispatchSemaphore(value: 0)
-            var loadedDescs: [CMFormatDescription] = []
-            Task {
-                do {
-                    let descs = try await track.load(.formatDescriptions)
-                    loadedDescs = descs as [CMFormatDescription]
-                } catch {
-                    // Will be handled below
-                }
-                semaphore.signal()
-            }
-            semaphore.wait()
-            formatDescriptions = loadedDescs
-        } else {
-            formatDescriptions = track.formatDescriptions as? [CMFormatDescription] ?? []
-        }
+        // Get source format description (sync API — safe on all iOS versions)
+        let formatDescriptions = track.formatDescriptions as? [CMFormatDescription] ?? []
         
         guard let formatDescription = formatDescriptions.first else {
             return .error(message: "Could not get audio format description")
@@ -319,19 +290,7 @@ class WavToM4aConverter {
         // Validate M4A duration matches source WAV duration
         if deleteWavAfterConversion && duration > 0 {
             let outputAsset = AVAsset(url: URL(fileURLWithPath: outputPath))
-            let outputDuration: Double
-            if #available(iOS 16.0, *) {
-                let semaphore = DispatchSemaphore(value: 0)
-                var dur: Double = 0
-                Task {
-                    dur = (try? await outputAsset.load(.duration).seconds) ?? 0
-                    semaphore.signal()
-                }
-                semaphore.wait()
-                outputDuration = dur
-            } else {
-                outputDuration = outputAsset.duration.seconds
-            }
+            let outputDuration = outputAsset.duration.seconds
             let tolerance = max(duration * 0.1, 0.5) // 10% tolerance, minimum 0.5s
             
             let durationDiff: Double = Swift.abs(outputDuration - duration)

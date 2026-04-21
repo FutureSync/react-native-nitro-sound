@@ -317,14 +317,16 @@ class HybridSound : HybridSoundSpec() {
                 val service = RecordingForegroundService.getInstance()
                 service?.stopRecording()
             } catch (e: Exception) {
-                Logger.d("resetRecordingState", "Stop during reset failed (safe to ignore): ${e.message}")
+                Logger.d("[resetRecordingState] Stop during reset failed (safe to ignore): ${e.message}")
             }
 
             handler.post {
-                stopRecordTimer()
+                // Note: The recording timer lives inside RecordingForegroundService
+                // and is stopped automatically by service.stopRecording() above.
+                // No local timer to cancel here.
                 if (isServiceBound) {
                     try {
-                        reactContext?.unbindService(serviceConnection)
+                        context.unbindService(serviceConnection)
                     } catch (_: Exception) {}
                     isServiceBound = false
                 }

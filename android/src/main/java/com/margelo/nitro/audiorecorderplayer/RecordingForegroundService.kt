@@ -7,7 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.media.MediaRecorder
+import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import com.margelo.nitro.sound.R
 import java.io.File
 import java.util.Timer
 import java.util.TimerTask
@@ -50,9 +51,15 @@ class RecordingForegroundService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "recording_channel"
-        private const val CHANNEL_NAME = "Audio Recording"
         private const val WAKE_LOCK_TAG = "RecordingForegroundService::WakeLock"
-        
+
+        // Action used by the notification's deleteIntent. On Android 14+ users can
+        // dismiss even an ongoing FGS notification — when that happens we re-post
+        // it as long as a recording (active or paused) is still in progress. Only
+        // when the recording is stopped do we let the notification go away.
+        private const val ACTION_NOTIFICATION_DISMISSED =
+            "com.margelo.nitro.audiorecorderplayer.NOTIFICATION_DISMISSED"
+
         // Audio constants
         private const val SILENCE_THRESHOLD_DB = -160.0
         private const val METERING_UPDATE_INTERVAL_MS = 100L
@@ -92,11 +99,41 @@ class RecordingForegroundService : Service() {
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification())
+        // Android 14+ allows the user to dismiss even an ongoing FGS notification.
+        // When that happens we receive ACTION_NOTIFICATION_DISMISSED via the
+        // deleteIntent and re-post the notification as long as a recording is
+        // still in progress (active or paused). The notification is only
+        // permanently removed when the JS layer calls stopService().
+        if (intent?.action == ACTION_NOTIFICATION_DISMISSED) {
+            if (isRecordingOrPaused()) {
+                Logger.d("[ForegroundService] Notification was dismissed by user — re-posting (recording in progress)")
+                updateNotification(paused = isCurrentlyPaused())
+            }
+            return START_NOT_STICKY
+        }
+
+        // On API 29+ we MUST declare the foreground service type at runtime as well as
+        // in the manifest. On API 34+ Google Play also requires that an app holds the
+        // matching FOREGROUND_SERVICE_<TYPE> permission (declared in the merged manifest).
+        // Failing to pass the type causes a SecurityException on Android 14+.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                createNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, createNotification())
+        }
         // Use START_NOT_STICKY: if the system kills the process, don't restart
         // the service automatically. This prevents a zombie foreground notification
         // with no active recording and no way to stop it from JS.
         return START_NOT_STICKY
+    }
+
+    private fun isRecordingOrPaused(): Boolean {
+        val recorder = wavRecorder ?: return false
+        return recorder.isCurrentlyRecording() || recorder.isCurrentlyPaused()
     }
     
     override fun onBind(intent: Intent?): IBinder {
@@ -210,7 +247,7 @@ class RecordingForegroundService : Service() {
             startRecordTimer(subscriptionDuration)
             
             // Update notification
-            updateNotification("Recording in progress...")
+            updateNotification(paused = false)
             
             Logger.d("[ForegroundService] WAV recording started: $wavFilePath")
             return true
@@ -229,7 +266,7 @@ class RecordingForegroundService : Service() {
             if (success) {
                 stopRecordTimer()
                 releaseWakeLock()
-                updateNotification("Recording paused")
+                updateNotification(paused = true)
             }
             success
         } catch (e: Exception) {
@@ -246,7 +283,7 @@ class RecordingForegroundService : Service() {
             if (success) {
                 acquireWakeLock()
                 startRecordTimer(subscriptionDurationMs)
-                updateNotification("Recording in progress...")
+                updateNotification(paused = false)
             }
             success
         } catch (e: Exception) {
@@ -275,8 +312,37 @@ class RecordingForegroundService : Service() {
             
             // Release wake lock when recording stops
             releaseWakeLock()
+
+            // Recording is finished — now (and only now) is the notification
+            // allowed to disappear. Detach from the foreground state and remove
+            // the visible notification explicitly, then stop the service itself
+            // to guarantee the notification disappears immediately.
+            removeForegroundNotification()
+            stopSelf()
         } catch (e: Exception) {
             Logger.e("[ForegroundService] Error in stopRecordingInternal: ${e.message}", e)
+        }
+    }
+
+    private fun removeForegroundNotification() {
+        try {
+            // First, detach from foreground state and request notification removal
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+
+            // Then explicitly cancel the notification via NotificationManager to
+            // guarantee it disappears immediately. Some Android versions (especially
+            // custom ROMs) don't always honor STOP_FOREGROUND_REMOVE instantly.
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager?.cancel(NOTIFICATION_ID)
+
+            Logger.d("[ForegroundService] Foreground notification removed")
+        } catch (e: Exception) {
+            Logger.w("[ForegroundService] Error removing foreground notification: ${e.message}", e)
         }
     }
     
@@ -353,10 +419,10 @@ class RecordingForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                CHANNEL_NAME,
+                getString(R.string.nitrosound_notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Audio recording in progress"
+                description = getString(R.string.nitrosound_notification_channel_description)
                 setShowBadge(false)
             }
             
@@ -365,38 +431,102 @@ class RecordingForegroundService : Service() {
         }
     }
     
-    private fun createNotification(contentText: String = "Tap to return to app"): Notification {
-        val packageName = packageName
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-            ?: Intent().apply { 
-                // Fallback: create a basic intent if no launch activity found
-                setPackage(packageName)
-            }
+    /**
+     * Build the foreground recording notification.
+     *
+     * Compliance notes (Google Play foreground service policy):
+     * - Title and body clearly identify the recording activity (required for FOREGROUND_SERVICE_MICROPHONE)
+     * - Uses the host app's launcher icon so the user can identify which app is recording
+     * - Provides an explicit "Open recorder" action so the user always has a discoverable
+     *   path back to the in-app stop control (single source of truth in JS)
+     */
+    private fun createNotification(paused: Boolean = false): Notification {
+        val launchPendingIntent = buildLaunchPendingIntent()
+        
+        val titleResId = if (paused) {
+            R.string.nitrosound_notification_title_paused
+        } else {
+            R.string.nitrosound_notification_title_recording
+        }
+        val textResId = if (paused) {
+            R.string.nitrosound_notification_text_paused
+        } else {
+            R.string.nitrosound_notification_text_recording
+        }
+        
+        // Prefer the host app's launcher icon for the small icon so the user
+        // immediately recognises which app is recording. Fall back to the
+        // platform mic icon if the host app icon is unavailable.
+        val smallIconRes = applicationInfo.icon.takeIf { it != 0 }
+            ?: android.R.drawable.ic_btn_speak_now
+        
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(titleResId))
+            .setContentText(getString(textResId))
+            .setSmallIcon(smallIconRes)
+            .setContentIntent(launchPendingIntent)
+            // setOngoing(true) prevents swipe-to-dismiss on Android <14. On
+            // Android 14+ the user can still dismiss it manually, so we also
+            // wire a deleteIntent below to re-post the notification while a
+            // recording is still in progress.
+            .setOngoing(true)
+            .setAutoCancel(false)
+            // Avoid re-playing the notification sound/vibration each time we
+            // refresh the title (recording <-> paused).
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDeleteIntent(buildDismissedPendingIntent())
+        
+        // Action button: "Open recorder". Uses the same launch intent as the body tap
+        // but exposes a labelled control to satisfy the policy requirement that the
+        // user has a clear path to terminate the foreground service.
+        if (launchPendingIntent != null) {
+            builder.addAction(
+                NotificationCompat.Action.Builder(
+                    smallIconRes,
+                    getString(R.string.nitrosound_notification_action_open),
+                    launchPendingIntent
+                ).build()
+            )
+        }
+        
+        return builder.build()
+    }
+    
+    private fun buildLaunchPendingIntent(): PendingIntent? {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return null
+        // Bring the existing task to front rather than spawning a new instance
+        // (recorder UI lives in MainActivity which uses launchMode="singleTask").
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         } else {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            launchIntent,
-            pendingIntentFlags
-        )
-        
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Recording audio")
-            .setContentText(contentText)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
+        return PendingIntent.getActivity(this, 0, launchIntent, pendingIntentFlags)
+    }
+
+    /**
+     * Pending intent fired by the system when the user manually dismisses the
+     * notification. We route it back to onStartCommand so we can re-post the
+     * notification while a recording is still in progress.
+     */
+    private fun buildDismissedPendingIntent(): PendingIntent {
+        val intent = Intent(this, RecordingForegroundService::class.java).apply {
+            action = ACTION_NOTIFICATION_DISMISSED
+        }
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        return PendingIntent.getService(this, 1, intent, flags)
     }
     
-    private fun updateNotification(text: String) {
-        val notification = createNotification(text)
+    private fun updateNotification(paused: Boolean) {
+        val notification = createNotification(paused)
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, notification)
     }

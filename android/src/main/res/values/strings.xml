@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Strings for the foreground recording notification shown by
+      RecordingForegroundService. They are user-facing and required for
+      Google Play foreground service permission compliance: the notification
+      must clearly identify the recording activity and the recorder.
+    -->
+    <string name="nitrosound_notification_channel_name">Audio recording</string>
+    <string name="nitrosound_notification_channel_description">Indicates an active audio recording session.</string>
+    <string name="nitrosound_notification_title_recording">Recording in progress</string>
+    <string name="nitrosound_notification_title_paused">Recording paused</string>
+    <string name="nitrosound_notification_text_recording">Tap to return to the app</string>
+    <string name="nitrosound_notification_text_paused">Tap to resume or stop the recording</string>
+    <string name="nitrosound_notification_action_open">Open recorder</string>
+</resources>

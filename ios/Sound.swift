@@ -458,7 +458,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     public func stopRecorder() throws -> Promise<String> {
         let promise = Promise<String>()
 
-        // Return immediately and process in background
+        // Finalize WAV on a background queue; JS converts to M4A via restoreRecording / app pipeline (keeps UI responsive).
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else {
                 promise.reject(withError: RuntimeError.error(withMessage: "Self is nil"))
@@ -475,7 +475,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     self.stopRecordTimer()
                     self.removeInterruptionObserver()
                     
-                    // Continue with conversion in background
+                    // Return WAV immediately so JS can dismiss UI; convert via restoreRecording / app pipeline.
                     DispatchQueue.global(qos: .userInitiated).async {
                         self.audioRecorder = nil
 
@@ -483,50 +483,14 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                         try? self.recordingSession?.setActive(false)
                         self.recordingSession = nil
 
-                        // Convert WAV→M4A with retry (AAC encoder may be temporarily unavailable after interruption)
-                        let maxRetries = 3
-                        var lastError: String = ""
+                        _ = self.repairWavFile(wavPath)
 
-                        for attempt in 1...maxRetries {
-                            if attempt > 1 {
-                                let delayMs = 500.0 * pow(2.0, Double(attempt - 2))
-                                print("[stopRecorder] WAV→M4A retry \(attempt)/\(maxRetries) after \(Int(delayMs))ms")
-                                Thread.sleep(forTimeInterval: delayMs / 1000.0)
-
-                                do {
-                                    let session = AVAudioSession.sharedInstance()
-                                    try session.setCategory(.playback, mode: .default)
-                                    try session.setActive(true)
-                                    print("[stopRecorder] Audio session re-activated for retry")
-                                } catch {
-                                    print("[stopRecorder] WARN: Could not re-activate audio session: \(error)")
-                                }
-                            }
-
-                            let conversionResult = WavToM4aConverter.convertSync(
-                                wavFilePath: wavPath,
-                                deleteWavAfterConversion: true
-                            )
-
-                            switch conversionResult {
-                            case .success(let outputPath, _):
-                                let outputURL = URL(fileURLWithPath: outputPath)
-                                print("[stopRecorder] WAV→M4A OK (attempt \(attempt)): \(outputPath)")
-                                promise.resolve(withResult: outputURL.absoluteString)
-                                return
-                            case .error(let message):
-                                lastError = message
-                                print("[stopRecorder] WAV→M4A FAILED (attempt \(attempt)/\(maxRetries)): \(message)")
-                            }
+                        guard FileManager.default.fileExists(atPath: wavPath) else {
+                            promise.reject(withError: RuntimeError.error(withMessage: "Recording file not found after stop: \(wavPath)"))
+                            return
                         }
-
-                        // All retries exhausted — resolve with WAV so JS layer can persist and retry later
-                        if FileManager.default.fileExists(atPath: wavPath) {
-                            print("[stopRecorder] All \(maxRetries) conversion attempts failed, returning WAV for later retry: \(wavPath)")
-                            promise.resolve(withResult: wavURL.absoluteString)
-                        } else {
-                            promise.reject(withError: RuntimeError.error(withMessage: "Recording conversion failed after \(maxRetries) attempts: \(lastError)"))
-                        }
+                        print("[stopRecorder] returning WAV; JS will convert via restoreRecording: \(wavPath)")
+                        promise.resolve(withResult: wavURL.absoluteString)
                     }
                 }
             } else {
@@ -1400,181 +1364,181 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     public func mergeAudioFiles(filePaths: [String], outputPath: String?) throws -> Promise<MergeResult> {
         let promise = Promise<MergeResult>()
 
-        // DispatchQueue.global(qos: .userInitiated).async {
-        //     do {
-        //         guard !filePaths.isEmpty else {
-        //             promise.reject(withError: RuntimeError.error(withMessage: "No input files to merge"))
-        //             return
-        //         }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                guard !filePaths.isEmpty else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "No input files to merge"))
+                    return
+                }
 
-        //         for raw in filePaths {
-        //             let std = (raw as NSString).standardizingPath
-        //             guard Self.validatePathSecurity(path: std) else {
-        //                 promise.reject(withError: RuntimeError.error(withMessage: "Access denied: an input path is outside allowed paths"))
-        //                 return
-        //             }
-        //             guard FileManager.default.fileExists(atPath: std) else {
-        //                 promise.reject(withError: RuntimeError.error(withMessage: "Input file not found: \(std)"))
-        //                 return
-        //             }
-        //         }
+                for raw in filePaths {
+                    let std = (raw as NSString).standardizingPath
+                    guard Self.validatePathSecurity(path: std) else {
+                        promise.reject(withError: RuntimeError.error(withMessage: "Access denied: an input path is outside allowed paths"))
+                        return
+                    }
+                    guard FileManager.default.fileExists(atPath: std) else {
+                        promise.reject(withError: RuntimeError.error(withMessage: "Input file not found: \(std)"))
+                        return
+                    }
+                }
 
-        //         let resolvedOutputPath: String
-        //         if let out = outputPath {
-        //             resolvedOutputPath = (out as NSString).standardizingPath
-        //         } else {
-        //             let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        //             let name = "merged_\(Int(Date().timeIntervalSince1970 * 1000)).m4a"
-        //             resolvedOutputPath = docs.appendingPathComponent(name).path
-        //         }
+                let resolvedOutputPath: String
+                if let out = outputPath {
+                    resolvedOutputPath = (out as NSString).standardizingPath
+                } else {
+                    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                    let name = "merged_\(Int(Date().timeIntervalSince1970 * 1000)).m4a"
+                    resolvedOutputPath = docs.appendingPathComponent(name).path
+                }
 
-        //         let resolvedOutputURL = URL(fileURLWithPath: resolvedOutputPath)
-        //         let parentDir = resolvedOutputURL.deletingLastPathComponent()
-        //         if !FileManager.default.fileExists(atPath: parentDir.path) {
-        //             try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        //         }
+                let resolvedOutputURL = URL(fileURLWithPath: resolvedOutputPath)
+                let parentDir = resolvedOutputURL.deletingLastPathComponent()
+                if !FileManager.default.fileExists(atPath: parentDir.path) {
+                    try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+                }
 
-        //         // Single WAV file: convert WAV→M4A, reject if conversion fails
-        //         // (auto-resend will retry later when AAC encoder is available)
-        //         if filePaths.count == 1 {
-        //             let singlePath = (filePaths[0] as NSString).standardizingPath
-        //             if singlePath.lowercased().hasSuffix(".wav") {
-        //                 print("[Merge] Single WAV path: \(singlePath)")
-        //                 let repaired = self.repairWavFile(singlePath)
-        //                 print("[Merge] repairWavFile result: \(repaired)")
-        //                 let singleAttrs = try? FileManager.default.attributesOfItem(atPath: singlePath)
-        //                 let singleSize = (singleAttrs?[.size] as? UInt64) ?? 0
-        //                 print("[Merge] WAV size after repair: \(singleSize) bytes")
-        //                 let convResult = WavToM4aConverter.convertSync(
-        //                     wavFilePath: singlePath,
-        //                     m4aFilePath: resolvedOutputPath,
-        //                     deleteWavAfterConversion: false
-        //                 )
-        //                 switch convResult {
-        //                 case .success(let outPath, let duration):
-        //                     print("[Merge] Single WAV→M4A OK: \(outPath), duration=\(duration)s")
-        //                     promise.resolve(withResult: MergeResult(outputPath: outPath, duration: duration, inputCount: 1))
-        //                 case .error(let message):
-        //                     print("[Merge] Single WAV→M4A FAILED (\(message)), WAV kept for retry")
-        //                     promise.reject(withError: RuntimeError.error(withMessage: "WAV→M4A conversion failed: \(message)"))
-        //                 }
-        //                 return
-        //             }
-        //         }
+                // Single WAV file: convert WAV→M4A, reject if conversion fails
+                // (auto-resend will retry later when AAC encoder is available)
+                if filePaths.count == 1 {
+                    let singlePath = (filePaths[0] as NSString).standardizingPath
+                    if singlePath.lowercased().hasSuffix(".wav") {
+                        print("[Merge] Single WAV path: \(singlePath)")
+                        let repaired = self.repairWavFile(singlePath)
+                        print("[Merge] repairWavFile result: \(repaired)")
+                        let singleAttrs = try? FileManager.default.attributesOfItem(atPath: singlePath)
+                        let singleSize = (singleAttrs?[.size] as? UInt64) ?? 0
+                        print("[Merge] WAV size after repair: \(singleSize) bytes")
+                        let convResult = WavToM4aConverter.convertSync(
+                            wavFilePath: singlePath,
+                            m4aFilePath: resolvedOutputPath,
+                            deleteWavAfterConversion: false
+                        )
+                        switch convResult {
+                        case .success(let outPath, let duration):
+                            print("[Merge] Single WAV→M4A OK: \(outPath), duration=\(duration)s")
+                            promise.resolve(withResult: MergeResult(outputPath: outPath, duration: duration, inputCount: 1))
+                        case .error(let message):
+                            print("[Merge] Single WAV→M4A FAILED (\(message)), WAV kept for retry")
+                            promise.reject(withError: RuntimeError.error(withMessage: "WAV→M4A conversion failed: \(message)"))
+                        }
+                        return
+                    }
+                }
 
-        //         // ---- Multi-file merge using AVMutableComposition + AVAssetExportSession ----
-        //         print("[Merge] Starting multi-file merge: \(filePaths.count) files → \(resolvedOutputPath)")
+                // ---- Multi-file merge using AVMutableComposition + AVAssetExportSession ----
+                print("[Merge] Starting multi-file merge: \(filePaths.count) files → \(resolvedOutputPath)")
 
-        //         var totalSize: UInt64 = 0
-        //         var totalDuration: Double = 0
-        //         var inputCount = 0
+                var totalSize: UInt64 = 0
+                var totalDuration: Double = 0
+                var inputCount = 0
 
-        //         print("[Merge] Collecting input files...")
+                print("[Merge] Collecting input files...")
 
-        //         let composition = AVMutableComposition()
-        //         guard let compositionTrack = composition.addMutableTrack(
-        //             withMediaType: .audio,
-        //             preferredTrackID: kCMPersistentTrackID_Invalid
-        //         ) else {
-        //             promise.reject(withError: RuntimeError.error(withMessage: "Failed to create composition track"))
-        //             return
-        //         }
+                let composition = AVMutableComposition()
+                guard let compositionTrack = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create composition track"))
+                    return
+                }
 
-        //         var currentTime = CMTime.zero
+                var currentTime = CMTime.zero
 
-        //         for raw in filePaths {
-        //             let std = (raw as NSString).standardizingPath
+                for raw in filePaths {
+                    let std = (raw as NSString).standardizingPath
 
-        //             if std.lowercased().hasSuffix(".wav") {
-        //                 _ = self.repairWavFile(std)
-        //             }
+                    if std.lowercased().hasSuffix(".wav") {
+                        _ = self.repairWavFile(std)
+                    }
 
-        //             let attrs = try? FileManager.default.attributesOfItem(atPath: std)
-        //             let fileSize = (attrs?[.size] as? UInt64) ?? 0
-        //             totalSize += fileSize
+                    let attrs = try? FileManager.default.attributesOfItem(atPath: std)
+                    let fileSize = (attrs?[.size] as? UInt64) ?? 0
+                    totalSize += fileSize
 
-        //             let asset = AVAsset(url: URL(fileURLWithPath: std))
-        //             let tracks = asset.tracks(withMediaType: .audio)
-        //             guard let audioTrack = tracks.first else {
-        //                 print("[Merge] SKIP file (no audio track): \(std), size=\(fileSize)B")
-        //                 continue
-        //             }
+                    let asset = AVAsset(url: URL(fileURLWithPath: std))
+                    let tracks = asset.tracks(withMediaType: .audio)
+                    guard let audioTrack = tracks.first else {
+                        print("[Merge] SKIP file (no audio track): \(std), size=\(fileSize)B")
+                        continue
+                    }
 
-        //             let dur = asset.duration
-        //             totalDuration += dur.seconds
-        //             print("[Merge] Input[\(inputCount)]: \(std.components(separatedBy: "/").last ?? std), size=\(fileSize)B, dur=\(String(format: "%.2f", dur.seconds))s")
+                    let dur = asset.duration
+                    totalDuration += dur.seconds
+                    print("[Merge] Input[\(inputCount)]: \(std.components(separatedBy: "/").last ?? std), size=\(fileSize)B, dur=\(String(format: "%.2f", dur.seconds))s")
 
-        //             let timeRange = CMTimeRange(start: .zero, duration: dur)
-        //             do {
-        //                 try compositionTrack.insertTimeRange(timeRange, of: audioTrack, at: currentTime)
-        //                 currentTime = CMTimeAdd(currentTime, dur)
-        //                 inputCount += 1
-        //             } catch {
-        //                 print("[Merge] SKIP file (insert failed): \(std), error=\(error.localizedDescription)")
-        //             }
-        //         }
+                    let timeRange = CMTimeRange(start: .zero, duration: dur)
+                    do {
+                        try compositionTrack.insertTimeRange(timeRange, of: audioTrack, at: currentTime)
+                        currentTime = CMTimeAdd(currentTime, dur)
+                        inputCount += 1
+                    } catch {
+                        print("[Merge] SKIP file (insert failed): \(std), error=\(error.localizedDescription)")
+                    }
+                }
 
-        //         print("[Merge] Total input: \(inputCount) files, \(String(format: "%.2f", Double(totalSize) / 1024.0))KB, \(String(format: "%.2f", totalDuration))s")
+                print("[Merge] Total input: \(inputCount) files, \(String(format: "%.2f", Double(totalSize) / 1024.0))KB, \(String(format: "%.2f", totalDuration))s")
 
-        //         guard inputCount > 0 else {
-        //             promise.reject(withError: RuntimeError.error(withMessage: "No audio tracks found in input files"))
-        //             return
-        //         }
+                guard inputCount > 0 else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "No audio tracks found in input files"))
+                    return
+                }
 
-        //         let preset = AVAssetExportPresetAppleM4A
+                let preset = AVAssetExportPresetAppleM4A
 
-        //         let m4aOutputPath = (resolvedOutputPath as NSString).deletingPathExtension + ".m4a"
-        //         let m4aOutputURL = URL(fileURLWithPath: m4aOutputPath)
+                let m4aOutputPath = (resolvedOutputPath as NSString).deletingPathExtension + ".m4a"
+                let m4aOutputURL = URL(fileURLWithPath: m4aOutputPath)
 
-        //         if FileManager.default.fileExists(atPath: m4aOutputPath) {
-        //             try? FileManager.default.removeItem(at: m4aOutputURL)
-        //         }
+                if FileManager.default.fileExists(atPath: m4aOutputPath) {
+                    try? FileManager.default.removeItem(at: m4aOutputURL)
+                }
 
-        //         guard let exportSession = AVAssetExportSession(asset: composition, presetName: preset) else {
-        //             promise.reject(withError: RuntimeError.error(withMessage: "Failed to create export session"))
-        //             return
-        //         }
-        //         exportSession.outputURL = m4aOutputURL
-        //         exportSession.outputFileType = .m4a
+                guard let exportSession = AVAssetExportSession(asset: composition, presetName: preset) else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create export session"))
+                    return
+                }
+                exportSession.outputURL = m4aOutputURL
+                exportSession.outputFileType = .m4a
 
-        //         print("[Merge] Exporting with preset=\(preset)...")
+                print("[Merge] Exporting with preset=\(preset)...")
 
-        //         let exportSemaphore = DispatchSemaphore(value: 0)
-        //         exportSession.exportAsynchronously { exportSemaphore.signal() }
-        //         exportSemaphore.wait()
+                let exportSemaphore = DispatchSemaphore(value: 0)
+                exportSession.exportAsynchronously { exportSemaphore.signal() }
+                exportSemaphore.wait()
 
-        //         switch exportSession.status {
-        //         case .completed:
-        //             let m4aAttrs = try? FileManager.default.attributesOfItem(atPath: m4aOutputPath)
-        //             let m4aSize = (m4aAttrs?[.size] as? UInt64) ?? 0
-        //             print("[Merge] Export DONE: M4A=\(String(format: "%.2f", Double(m4aSize) / 1024.0))KB, path=\(m4aOutputPath)")
+                switch exportSession.status {
+                case .completed:
+                    let m4aAttrs = try? FileManager.default.attributesOfItem(atPath: m4aOutputPath)
+                    let m4aSize = (m4aAttrs?[.size] as? UInt64) ?? 0
+                    print("[Merge] Export DONE: M4A=\(String(format: "%.2f", Double(m4aSize) / 1024.0))KB, path=\(m4aOutputPath)")
 
-        //             if resolvedOutputPath != m4aOutputPath {
-        //                 try? FileManager.default.removeItem(atPath: resolvedOutputPath)
-        //             }
+                    if resolvedOutputPath != m4aOutputPath {
+                        try? FileManager.default.removeItem(atPath: resolvedOutputPath)
+                    }
 
-        //             print("[Merge] COMPLETE: finalPath=\(m4aOutputPath), duration=\(String(format: "%.2f", totalDuration))s, inputs=\(inputCount)")
-        //             let result = MergeResult(
-        //                 outputPath: m4aOutputPath,
-        //                 duration: totalDuration,
-        //                 inputCount: Double(inputCount)
-        //             )
-        //             promise.resolve(withResult: result)
+                    print("[Merge] COMPLETE: finalPath=\(m4aOutputPath), duration=\(String(format: "%.2f", totalDuration))s, inputs=\(inputCount)")
+                    let result = MergeResult(
+                        outputPath: m4aOutputPath,
+                        duration: totalDuration,
+                        inputCount: Double(inputCount)
+                    )
+                    promise.resolve(withResult: result)
 
-        //         case .failed, .cancelled:
-        //             let errMsg = exportSession.error?.localizedDescription ?? "unknown"
-        //             print("[Merge] Export FAILED: \(errMsg)")
-        //             promise.reject(withError: RuntimeError.error(withMessage: "Export failed: \(errMsg)"))
+                case .failed, .cancelled:
+                    let errMsg = exportSession.error?.localizedDescription ?? "unknown"
+                    print("[Merge] Export FAILED: \(errMsg)")
+                    promise.reject(withError: RuntimeError.error(withMessage: "Export failed: \(errMsg)"))
 
-        //         default:
-        //             let statusCode = exportSession.status.rawValue
-        //             print("[Merge] Export unexpected status: \(statusCode)")
-        //             promise.reject(withError: RuntimeError.error(withMessage: "Unexpected export status: \(statusCode)"))
-        //         }
-        //     } catch {
-        //         promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
-        //     }
-        // }
+                default:
+                    let statusCode = exportSession.status.rawValue
+                    print("[Merge] Export unexpected status: \(statusCode)")
+                    promise.reject(withError: RuntimeError.error(withMessage: "Unexpected export status: \(statusCode)"))
+                }
+            } catch {
+                promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
+            }
+        }
 
         return promise
     }

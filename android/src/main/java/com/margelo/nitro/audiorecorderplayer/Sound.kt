@@ -371,32 +371,17 @@ class HybridSound : HybridSoundSpec() {
                     promise.reject(Exception("Recorder not started or path is unavailable."))
                     return@launch
                 }
-                
-                // Convert WAV to M4A for smaller file size
-                val conversionResult = WavToM4aConverter.convert(
-                    wavFilePath = wavPath,
-                    deleteWavAfterConversion = true
-                )
-                
-                when (conversionResult) {
-                    is WavToM4aConverter.ConversionResult.Success -> {
-                        val fileUri = Uri.fromFile(File(conversionResult.outputPath)).toString()
-                        if (fileUri.endsWith(".wav")) {
-                            Logger.w("[Sound] stopRecorder returning WAV file instead of M4A. Downstream consumers expecting M4A should handle this case.")
-                        }
-                        promise.resolve(fileUri)
-                    }
-                    is WavToM4aConverter.ConversionResult.Error -> {
-                        val wavFile = File(wavPath)
-                        if (wavFile.exists()) {
-                            Logger.w("[Sound] WAV→M4A conversion failed (${conversionResult.message}). Returning WAV file: $wavPath")
-                            val fileUri = Uri.fromFile(wavFile).toString()
-                            promise.resolve(fileUri)
-                        } else {
-                            promise.reject(Exception("Recording failed: ${conversionResult.message}"))
-                        }
-                    }
+
+                // Return WAV immediately so JS can dismiss UI; convert via restoreRecording / app pipeline.
+                WavRecorder.repairWavFile(wavPath)
+                val wavFile = File(wavPath)
+                if (!wavFile.exists()) {
+                    promise.reject(Exception("Recording file not found after stop: $wavPath"))
+                    return@launch
                 }
+                val fileUri = Uri.fromFile(wavFile).toString()
+                Logger.d("[Sound] stopRecorder returning WAV; convert in restoreRecording or app layer")
+                promise.resolve(fileUri)
             } catch (e: Exception) {
                 handler.post {
                     if (isServiceBound) {

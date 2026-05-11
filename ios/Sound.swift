@@ -797,7 +797,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     public func restorePendingRecordings(directory: String?) throws -> Promise<[RestoredRecording]> {
         let promise = Promise<[RestoredRecording]>()
         
-        DispatchQueue.global(qos: .userInitiated).async {
+        let workItem = DispatchWorkItem(qos: .default, flags: .enforceQoS) {
             do {
                 let scanDirectory: URL
                 if let directory = directory {
@@ -896,6 +896,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 promise.reject(withError: RuntimeError.error(withMessage: "Failed to restore recordings: \(error.localizedDescription)"))
             }
         }
+        DispatchQueue.global(qos: .default).async(execute: workItem)
         
         return promise
     }
@@ -907,7 +908,9 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     public func restoreRecording(wavFilePath: String) throws -> Promise<RestoredRecording> {
         let promise = Promise<RestoredRecording>()
         
-        DispatchQueue.global(qos: .userInitiated).async {
+        let workItem = DispatchWorkItem(qos: .default, flags: .enforceQoS) { [weak self] in
+            guard let self = self else { return }
+            
             // Validate path to prevent path traversal attacks
             guard Self.validatePathSecurity(path: wavFilePath) else {
                 promise.reject(withError: RuntimeError.error(withMessage: "Access denied: file path is outside allowed paths"))
@@ -951,6 +954,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 promise.reject(withError: RuntimeError.error(withMessage: "WAV→M4A conversion failed: \(message)"))
             }
         }
+        DispatchQueue.global(qos: .default).async(execute: workItem)
         
         return promise
     }
@@ -1364,7 +1368,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     public func mergeAudioFiles(filePaths: [String], outputPath: String?) throws -> Promise<MergeResult> {
         let promise = Promise<MergeResult>()
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        let workItem = DispatchWorkItem(qos: .default, flags: .enforceQoS) {
             do {
                 guard !filePaths.isEmpty else {
                     promise.reject(withError: RuntimeError.error(withMessage: "No input files to merge"))
@@ -1539,6 +1543,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
             }
         }
+        DispatchQueue.global(qos: .default).async(execute: workItem)
 
         return promise
     }

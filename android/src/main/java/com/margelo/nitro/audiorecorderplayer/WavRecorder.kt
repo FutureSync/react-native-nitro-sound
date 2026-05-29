@@ -34,6 +34,11 @@ class WavRecorder {
     private var filePath: String? = null
     @Volatile private var isRecording: Boolean = false
     @Volatile private var isPaused: Boolean = false
+
+    private var streamingEncoder: StreamingM4aEncoder? = null
+    /** Path to the M4A produced by the streaming encoder (null if encoding failed or not started). */
+    var streamingM4aPath: String? = null
+        private set
     
     // Audio settings
     private var sampleRate: Int = 44100
@@ -63,38 +68,143 @@ class WavRecorder {
         private const val PCM_FORMAT: Short = 1
         
         /**
-         * Repair a WAV file by updating its header with correct data size.
-         * Useful for recovering files after app crash.
+         * Repair a WAV file by updating its RIFF chunk size and data chunk size.
+         * Scans for the "data" chunk dynamically instead of assuming offset 40,
+         * so non-standard WAVs with extra chunks before "data" are handled correctly.
+         *
+         * If the file lacks RIFF/WAVE headers entirely (raw PCM data from a
+         * crash-interrupted recording), a full 44-byte header is prepended using
+         * the default recording parameters (44100 Hz, mono, 16-bit PCM).
          */
         fun repairWavFile(filePath: String): Boolean {
             return try {
                 val file = File(filePath)
-                if (!file.exists() || file.length() < WAV_HEADER_SIZE) {
+                if (!file.exists() || file.length() < 2) {
                     return false
                 }
-                
-                val dataSize = file.length() - WAV_HEADER_SIZE
-                val fileSize = dataSize + WAV_HEADER_SIZE - 8
-                
-                // WAV format uses 32-bit sizes; files > 2GB will have truncated headers
-                if (dataSize > Int.MAX_VALUE) {
-                    Logger.w("[WavRecorder] WAV file exceeds 2GB ($dataSize bytes), header sizes will be truncated")
-                }
-                
+
+                val fileLength = file.length()
+
                 RandomAccessFile(file, "rw").use { raf ->
+                    if (fileLength < WAV_HEADER_SIZE) {
+                        Logger.w("[WavRecorder] File too small for WAV header ($fileLength bytes), treating as raw PCM: $filePath")
+                        raf.close()
+                        return prependWavHeader(file)
+                    }
+
+                    val riffHeader = ByteArray(12)
+                    raf.readFully(riffHeader)
+                    val riffId = String(riffHeader, 0, 4, Charsets.US_ASCII)
+                    val waveId = String(riffHeader, 8, 4, Charsets.US_ASCII)
+                    if (riffId != RIFF || waveId != WAVE) {
+                        Logger.w("[WavRecorder] No RIFF/WAVE header, treating as raw PCM: $filePath")
+                        raf.close()
+                        return prependWavHeader(file)
+                    }
+
+                    // Scan chunks sequentially to find "data"
+                    var offset = 12L
+                    var dataChunkOffset = -1L
+
+                    while (offset + 8 <= fileLength) {
+                        raf.seek(offset)
+                        val chunkIdBytes = ByteArray(4)
+                        val chunkSizeBytes = ByteArray(4)
+                        if (raf.read(chunkIdBytes) != 4 || raf.read(chunkSizeBytes) != 4) break
+
+                        val chunkId = String(chunkIdBytes, Charsets.US_ASCII)
+                        val chunkSize = ByteBuffer.wrap(chunkSizeBytes)
+                            .order(ByteOrder.LITTLE_ENDIAN)
+                            .int
+                            .toLong() and 0xFFFFFFFFL
+
+                        if (chunkId == DATA) {
+                            dataChunkOffset = offset
+                            break
+                        }
+                        // Advance past this chunk (size + padding to even boundary)
+                        val padded = chunkSize + (chunkSize and 1L)
+                        offset += 8 + padded
+                    }
+
+                    if (dataChunkOffset < 0) {
+                        Logger.w("[WavRecorder] No 'data' chunk found in: $filePath")
+                        return false
+                    }
+
+                    val riffChunkSize = (fileLength - 8).toInt()
+                    val dataPayloadSize = (fileLength - dataChunkOffset - 8).toInt()
+
+                    if (fileLength - 8 > Int.MAX_VALUE) {
+                        Logger.w("[WavRecorder] WAV file exceeds 2GB ($fileLength bytes), header sizes will be truncated")
+                    }
+
                     // Update RIFF chunk size at position 4
                     raf.seek(4)
-                    raf.write(intToByteArray(fileSize.toInt()))
-                    
-                    // Update data chunk size at position 40
-                    raf.seek(40)
-                    raf.write(intToByteArray(dataSize.toInt()))
+                    raf.write(intToByteArray(riffChunkSize))
+
+                    // Update data chunk size at dataChunkOffset + 4
+                    raf.seek(dataChunkOffset + 4)
+                    raf.write(intToByteArray(dataPayloadSize))
                 }
-                
-                Logger.d("[WavRecorder] Repaired WAV file: $filePath (data size: $dataSize bytes)")
+
+                Logger.d("[WavRecorder] Repaired WAV file: $filePath (fileLength: $fileLength bytes)")
                 true
             } catch (e: Exception) {
                 Logger.e("[WavRecorder] Failed to repair WAV file: ${e.message}", e)
+                false
+            }
+        }
+
+        /**
+         * Prepend a standard 44-byte WAV header to a file that contains raw PCM data.
+         * Uses default recording parameters: 44100 Hz, mono, 16-bit.
+         * The original file is atomically replaced via rename.
+         */
+        private fun prependWavHeader(
+            file: File,
+            sampleRate: Int = 44100,
+            channels: Int = 1,
+            bitsPerSample: Int = 16
+        ): Boolean {
+            return try {
+                val rawSize = file.length()
+                if (rawSize < 2) return false
+
+                val byteRate = sampleRate * channels * bitsPerSample / 8
+                val blockAlign = channels * bitsPerSample / 8
+
+                val header = ByteBuffer.allocate(WAV_HEADER_SIZE)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                header.put(RIFF.toByteArray())
+                header.putInt((rawSize + WAV_HEADER_SIZE - 8).toInt())
+                header.put(WAVE.toByteArray())
+                header.put(FMT.toByteArray())
+                header.putInt(16) // PCM fmt chunk size
+                header.putShort(PCM_FORMAT)
+                header.putShort(channels.toShort())
+                header.putInt(sampleRate)
+                header.putInt(byteRate)
+                header.putShort(blockAlign.toShort())
+                header.putShort(bitsPerSample.toShort())
+                header.put(DATA.toByteArray())
+                header.putInt(rawSize.toInt())
+
+                val tmpFile = File(file.parent, file.name + ".tmp")
+                FileOutputStream(tmpFile).use { out ->
+                    out.write(header.array())
+                    file.inputStream().use { it.copyTo(out) }
+                }
+
+                if (!tmpFile.renameTo(file)) {
+                    file.delete()
+                    tmpFile.renameTo(file)
+                }
+
+                Logger.d("[WavRecorder] Prepended WAV header to raw PCM: ${file.absolutePath} ($rawSize bytes PCM)")
+                true
+            } catch (e: Exception) {
+                Logger.e("[WavRecorder] Failed to prepend WAV header: ${e.message}", e)
                 false
             }
         }
@@ -195,7 +305,19 @@ class WavRecorder {
             recordStartTime = System.currentTimeMillis()
             pausedDuration = 0L
             lastMaxAmplitude = 0
-            
+
+            // Start streaming M4A encoder (best-effort; falls back to post-recording conversion)
+            streamingM4aPath = null
+            val m4aPath = path.replace(Regex("\\.wav$", RegexOption.IGNORE_CASE), ".m4a")
+            val enc = StreamingM4aEncoder()
+            if (enc.start(m4aPath, sampleRateHz, channels, bitsPerSample)) {
+                streamingEncoder = enc
+                Logger.d("[WavRecorder] Streaming M4A encoder active: $m4aPath")
+            } else {
+                streamingEncoder = null
+                Logger.w("[WavRecorder] Streaming M4A encoder failed to start; will fall back to post-recording conversion")
+            }
+
             // Start recording
             isRecording = true
             isPaused = false
@@ -291,6 +413,24 @@ class WavRecorder {
         // Update WAV header with correct data size
         filePath?.let { path ->
             updateWavHeader(path, totalBytesWritten)
+        }
+
+        // Finalise the streaming M4A encoder
+        val enc = streamingEncoder
+        streamingEncoder = null
+        if (enc != null && !enc.failed) {
+            val ok = enc.stop()
+            if (ok) {
+                streamingM4aPath = enc.outputPath
+                Logger.d("[WavRecorder] Streaming M4A ready: ${enc.outputPath}")
+            } else {
+                streamingM4aPath = null
+                enc.outputPath?.let { File(it).delete() }
+                Logger.w("[WavRecorder] Streaming M4A failed; post-recording conversion will be used")
+            }
+        } else {
+            streamingM4aPath = null
+            enc?.release()
         }
         
         Logger.d("[WavRecorder] Recording stopped: $filePath ($totalBytesWritten bytes)")
@@ -423,6 +563,9 @@ class WavRecorder {
                 try {
                     outputStream?.write(buffer, 0, bytesRead)
                     totalBytesWritten += bytesRead
+
+                    // Feed the same PCM to the streaming M4A encoder
+                    streamingEncoder?.encode(buffer, 0, bytesRead)
                     
                     // Calculate max amplitude for metering
                     if (bitsPerSample == 16) {
@@ -532,6 +675,10 @@ class WavRecorder {
             Logger.d("[WavRecorder] Cleanup OutputStream: ${e.message}")
         }
         outputStream = null
+
+        streamingEncoder?.release()
+        streamingEncoder = null
+        streamingM4aPath = null
         
         recordingThread = null
     }

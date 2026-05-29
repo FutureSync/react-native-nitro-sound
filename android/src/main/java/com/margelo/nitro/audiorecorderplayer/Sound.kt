@@ -27,6 +27,8 @@ import java.util.Timer
 import java.util.TimerTask
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import com.margelo.nitro.audiorecorderplayer.Logger
 import com.margelo.nitro.audiorecorderplayer.RecordingForegroundService
@@ -836,7 +838,7 @@ class HybridSound : HybridSoundSpec() {
         val promise = Promise<MergeResult>()
 
         CoroutineScope(Dispatchers.IO).launch {
-            val tempFilesToDelete = mutableListOf<File>()
+            val tempFilesToDelete = java.util.Collections.synchronizedList(mutableListOf<File>())
             try {
                 if (filePaths.isEmpty()) {
                     promise.reject(Exception("No input files"))
@@ -851,7 +853,14 @@ class HybridSound : HybridSoundSpec() {
                     return@launch
                 }
 
-                val segmentPaths = mutableListOf<String>()
+                Logger.d("[Merge] Starting merge: ${filePaths.size} files → $resolvedOut")
+
+                var totalInputSize = 0L
+                var skippedCount = 0
+
+                // Validate all paths and collect metadata first
+                data class InputSegment(val index: Int, val path: String, val isWav: Boolean, val size: Long)
+                val inputs = mutableListOf<InputSegment>()
 
                 for ((index, rawPath) in filePaths.withIndex()) {
                     if (!validatePathSecurity(rawPath)) {
@@ -865,30 +874,133 @@ class HybridSound : HybridSoundSpec() {
                         return@launch
                     }
 
-                    if (rawPath.endsWith(".wav", ignoreCase = true)) {
-                        WavRecorder.repairWavFile(rawPath)
-                        val tempM4a = File(context.cacheDir, "merge_seg_${System.currentTimeMillis()}_$index.m4a")
-                        tempFilesToDelete.add(tempM4a)
+                    totalInputSize += inputFile.length()
+                    inputs.add(InputSegment(index, rawPath, rawPath.endsWith(".wav", ignoreCase = true), inputFile.length()))
+                }
 
-                        when (
+                // Promote WAV inputs that have a companion streaming-encoded M4A
+                val promoted = mutableListOf<InputSegment>()
+                val remaining = mutableListOf<InputSegment>()
+                for (seg in inputs) {
+                    if (seg.isWav) {
+                        val companionM4a = seg.path.replace(Regex("\\.wav$", RegexOption.IGNORE_CASE), ".m4a")
+                        val companionFile = File(companionM4a)
+                        if (companionFile.exists() && companionFile.length() > 0) {
+                            Logger.d("[Merge] Using streaming-encoded M4A for ${File(seg.path).name}")
+                            promoted.add(InputSegment(seg.index, companionM4a, false, companionFile.length()))
+                        } else {
+                            remaining.add(seg)
+                        }
+                    } else {
+                        remaining.add(seg)
+                    }
+                }
+                val allInputs = (promoted + remaining).sortedBy { it.index }
+                val wavInputs = allInputs.filter { it.isWav }
+                val m4aInputs = allInputs.filter { !it.isWav }
+
+                Logger.d("[Merge] Inputs: wav=${wavInputs.size} m4a=${m4aInputs.size} promoted=${promoted.size}")
+
+                // Fastest path: all WAVs were streaming-encoded → single M4A copy, zero conversion
+                if (wavInputs.isEmpty() && m4aInputs.size == 1) {
+                    val seg = m4aInputs[0]
+                    File(seg.path).copyTo(File(resolvedOut), overwrite = true)
+                    val outFile = File(resolvedOut)
+                    if (!outFile.exists() || outFile.length() == 0L) {
+                        promise.reject(Exception("Merge failed: output file missing or empty"))
+                        return@launch
+                    }
+                    val durationSec = getAudioDurationSecondsOrThrow(resolvedOut)
+                    val outSize = outFile.length()
+                    Logger.d("[Merge] COMPLETE (streaming): path=$resolvedOut, duration=${String.format("%.2f", durationSec)}s, size=${outSize / 1024}KB")
+                    promise.resolve(MergeResult(outputPath = resolvedOut, duration = durationSec, inputCount = 1.0))
+                    return@launch
+                }
+
+                // Fast path: single WAV input → convert directly to output, skip concatenation
+                if (wavInputs.size == 1 && m4aInputs.isEmpty()) {
+                    val seg = wavInputs[0]
+                    WavRecorder.repairWavFile(seg.path)
+                    Logger.d("[Merge] Single-WAV fast path: ${File(seg.path).name} (${seg.size}B) → $resolvedOut")
+                    val conv = WavToM4aConverter.convertSync(
+                        wavFilePath = seg.path,
+                        m4aFilePath = resolvedOut,
+                        deleteWavAfterConversion = false
+                    )
+                    when (conv) {
+                        is WavToM4aConverter.ConversionResult.Success -> {
+                            val outFile = File(resolvedOut)
+                            if (!outFile.exists() || outFile.length() == 0L) {
+                                promise.reject(Exception("Merge failed: output file missing or empty"))
+                                return@launch
+                            }
+                            val durationSec = getAudioDurationSecondsOrThrow(resolvedOut)
+                            val outSize = outFile.length()
+                            Logger.d("[Merge] COMPLETE (fast): path=$resolvedOut, duration=${String.format("%.2f", durationSec)}s, size=${outSize / 1024}KB")
+                            promise.resolve(MergeResult(outputPath = resolvedOut, duration = durationSec, inputCount = 1.0))
+                        }
+                        is WavToM4aConverter.ConversionResult.Error -> {
+                            Logger.e("[Merge] Single-WAV convert failed: ${conv.message}")
+                            promise.reject(Exception("WAV conversion failed: ${conv.message}"))
+                        }
+                    }
+                    return@launch
+                }
+
+                val conversionResults = if (wavInputs.size > 1) {
+                    Logger.d("[Merge] Converting ${wavInputs.size} WAV segments in parallel")
+                    wavInputs.map { seg ->
+                        async(Dispatchers.IO) {
+                            WavRecorder.repairWavFile(seg.path)
+                            val tempM4a = File(context.cacheDir, "merge_seg_${System.currentTimeMillis()}_${seg.index}.m4a")
+                            tempFilesToDelete.add(tempM4a)
+                            Logger.d("[Merge] Input[${seg.index}]: ${File(seg.path).name} (WAV, ${seg.size}B) → converting")
                             val conv = WavToM4aConverter.convertSync(
-                                wavFilePath = rawPath,
+                                wavFilePath = seg.path,
                                 m4aFilePath = tempM4a.absolutePath,
                                 deleteWavAfterConversion = false
                             )
-                        ) {
+                            Pair(seg, conv)
+                        }
+                    }.awaitAll()
+                } else {
+                    wavInputs.map { seg ->
+                        WavRecorder.repairWavFile(seg.path)
+                        val tempM4a = File(context.cacheDir, "merge_seg_${System.currentTimeMillis()}_${seg.index}.m4a")
+                        tempFilesToDelete.add(tempM4a)
+                        Logger.d("[Merge] Input[${seg.index}]: ${File(seg.path).name} (WAV, ${seg.size}B) → converting")
+                        val conv = WavToM4aConverter.convertSync(
+                            wavFilePath = seg.path,
+                            m4aFilePath = tempM4a.absolutePath,
+                            deleteWavAfterConversion = false
+                        )
+                        Pair(seg, conv)
+                    }
+                }
+
+                // Build ordered segment paths (preserving original order)
+                val segmentPaths = mutableListOf<String>()
+                val convertedMap = conversionResults.associate { (seg, result) -> seg.index to result }
+
+                for (seg in allInputs) {
+                    if (seg.isWav) {
+                        when (val conv = convertedMap[seg.index]) {
                             is WavToM4aConverter.ConversionResult.Success ->
                                 segmentPaths.add(conv.outputPath)
                             is WavToM4aConverter.ConversionResult.Error -> {
-                                promise.reject(Exception("Failed to convert WAV: $rawPath — ${conv.message}"))
-                                return@launch
+                                Logger.w("[Merge] SKIP WAV (conversion failed): ${File(seg.path).name} — ${conv.message}")
+                                skippedCount++
                             }
+                            else -> { skippedCount++ }
                         }
                     } else {
-                        if (!hasAudioTrack(rawPath)) {
+                        if (!hasAudioTrack(seg.path)) {
+                            Logger.d("[Merge] SKIP file (no audio track): ${File(seg.path).name}")
+                            skippedCount++
                             continue
                         }
-                        segmentPaths.add(rawPath)
+                        Logger.d("[Merge] Input[${seg.index}]: ${File(seg.path).name} (M4A, ${seg.size}B)")
+                        segmentPaths.add(seg.path)
                     }
                 }
 
@@ -897,8 +1009,19 @@ class HybridSound : HybridSoundSpec() {
                     return@launch
                 }
 
+                Logger.d("[Merge] Total input: ${segmentPaths.size} segments, ${totalInputSize / 1024}KB (skipped: $skippedCount)")
+
                 File(resolvedOut).parentFile?.mkdirs()
-                concatenateM4aFiles(segmentPaths, resolvedOut)
+                val mergedCount: Int
+                if (segmentPaths.size == 1) {
+                    val singleSrc = File(segmentPaths[0])
+                    val outTarget = File(resolvedOut)
+                    singleSrc.copyTo(outTarget, overwrite = true)
+                    mergedCount = 1
+                    Logger.d("[Merge] Single-segment fast path: copied ${singleSrc.name} → ${outTarget.name}")
+                } else {
+                    mergedCount = concatenateM4aFiles(segmentPaths, resolvedOut)
+                }
 
                 val outFile = File(resolvedOut)
                 if (!outFile.exists() || outFile.length() == 0L) {
@@ -907,14 +1030,19 @@ class HybridSound : HybridSoundSpec() {
                 }
 
                 val durationSec = getAudioDurationSecondsOrThrow(resolvedOut)
+                val outSize = outFile.length()
+
+                Logger.d("[Merge] COMPLETE: path=$resolvedOut, duration=${String.format("%.2f", durationSec)}s, size=${outSize / 1024}KB, mergedSegments=$mergedCount")
+
                 promise.resolve(
                     MergeResult(
                         outputPath = resolvedOut,
                         duration = durationSec,
-                        inputCount = filePaths.size.toDouble()
+                        inputCount = mergedCount.toDouble()
                     )
                 )
             } catch (e: Exception) {
+                Logger.e("[Merge] Failed: ${e.message}", e)
                 promise.reject(e)
             } finally {
                 for (f in tempFilesToDelete) {
@@ -1179,8 +1307,9 @@ class HybridSound : HybridSoundSpec() {
     /**
      * Concatenates AAC/M4A segments with identical audio format (mime, sample rate, channels).
      * WAV inputs must be converted to M4A before calling this.
+     * @return the number of segments actually written to the output
      */
-    private fun concatenateM4aFiles(segmentPaths: List<String>, outputPath: String) {
+    private fun concatenateM4aFiles(segmentPaths: List<String>, outputPath: String): Int {
         if (segmentPaths.isEmpty()) throw Exception("No segments to merge")
 
         val outFile = File(outputPath)
@@ -1194,6 +1323,9 @@ class HybridSound : HybridSoundSpec() {
         var muxerTrackIndex = -1
         var cumulativeOffsetUs = 0L
         var referenceFormat: MediaFormat? = null
+        var mergedCount = 0
+        // Compute sample duration for the PTS gap between segments (one AAC frame = 1024 samples)
+        var sampleDurationUs = 23220L // default ~23ms for 44100Hz AAC
 
         try {
             val muxerInstance = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -1217,14 +1349,22 @@ class HybridSound : HybridSoundSpec() {
 
                 if (audioTrackIndex < 0 || trackFormat == null) {
                     extractor.release()
-                    throw Exception("No audio track in: $path")
+                    Logger.w("[Merge] SKIP segment (no audio track): $path")
+                    continue
                 }
 
-                if (segmentIndex == 0) {
+                if (segmentIndex == 0 || referenceFormat == null) {
                     referenceFormat = trackFormat
                     muxerTrackIndex = muxerInstance.addTrack(trackFormat)
                     muxerInstance.start()
                     muxerStarted = true
+
+                    if (trackFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        val sr = trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        if (sr > 0) {
+                            sampleDurationUs = (1024L * 1_000_000L) / sr
+                        }
+                    }
                 } else {
                     if (!isAudioFormatCompatible(referenceFormat!!, trackFormat)) {
                         extractor.release()
@@ -1242,6 +1382,7 @@ class HybridSound : HybridSoundSpec() {
                 val buffer = ByteBuffer.allocate(bufferSize)
 
                 var segmentMaxPtsUs = 0L
+                var samplesInSegment = 0
 
                 while (true) {
                     buffer.clear()
@@ -1261,11 +1402,16 @@ class HybridSound : HybridSoundSpec() {
 
                     muxerInstance.writeSampleData(muxerTrackIndex, buffer, bufferInfo)
                     segmentMaxPtsUs = maxOf(segmentMaxPtsUs, adjustedPts)
+                    samplesInSegment++
 
                     if (!extractor.advance()) break
                 }
 
-                cumulativeOffsetUs = segmentMaxPtsUs + 1000L
+                // Use one AAC frame duration as the gap instead of a fixed 1ms
+                cumulativeOffsetUs = segmentMaxPtsUs + sampleDurationUs
+                mergedCount++
+
+                Logger.d("[Merge] Segment[$segmentIndex]: ${File(path).name}, $samplesInSegment samples, maxPts=${segmentMaxPtsUs}us")
 
                 extractor.release()
             }
@@ -1283,6 +1429,8 @@ class HybridSound : HybridSoundSpec() {
                 // ignore
             }
         }
+
+        return mergedCount
     }
 
     private fun getAudioDurationSecondsOrThrow(filePath: String): Double {
@@ -1290,17 +1438,24 @@ class HybridSound : HybridSoundSpec() {
         try {
             retriever.setDataSource(filePath)
             val ms = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-            if (ms == null || ms <= 0L) {
-                throw Exception("Cannot determine duration")
+            if (ms != null && ms > 0L) {
+                return ms / 1000.0
             }
-            return ms / 1000.0
+        } catch (e: Exception) {
+            Logger.w("[Sound] MediaMetadataRetriever failed for $filePath: ${e.message}")
         } finally {
             try {
                 retriever.release()
-            } catch (_: Exception) {
-                // ignore
-            }
+            } catch (_: Exception) {}
         }
+
+        // Fallback: calculate duration from WAV header if file is WAV format
+        if (filePath.endsWith(".wav", ignoreCase = true)) {
+            val wavDurationMs = estimateWavDuration(filePath)
+            if (wavDurationMs > 0.0) return wavDurationMs / 1000.0
+        }
+
+        throw Exception("Cannot determine duration for: ${File(filePath).name}")
     }
     
     private fun startPlayTimer() {

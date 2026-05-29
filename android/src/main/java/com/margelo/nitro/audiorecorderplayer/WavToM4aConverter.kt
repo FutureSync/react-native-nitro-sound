@@ -2,9 +2,10 @@ package com.margelo.nitro.audiorecorderplayer
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
-import android.os.Build
 import java.io.File
 import java.io.FileInputStream
 import java.io.RandomAccessFile
@@ -69,11 +70,17 @@ object WavToM4aConverter {
                 return@withContext ConversionResult.Error("WAV file not found: $wavFilePath")
             }
             
-            // Parse WAV header
-            val wavHeader = parseWavHeader(wavFilePath)
-                ?: return@withContext ConversionResult.Error("Invalid WAV file format")
+            var wavHeader = parseWavHeader(wavFilePath)
+            if (wavHeader == null) {
+                Logger.w("[WavToM4a] Header parse failed, attempting repair: $wavFilePath")
+                if (WavRecorder.repairWavFile(wavFilePath)) {
+                    wavHeader = parseWavHeader(wavFilePath)
+                }
+                if (wavHeader == null) {
+                    return@withContext ConversionResult.Error("Invalid WAV file format")
+                }
+            }
             
-            // Validate WAV format
             if (wavHeader.audioFormat != 1) {
                 return@withContext ConversionResult.Error("Only PCM WAV files are supported")
             }
@@ -82,7 +89,6 @@ object WavToM4aConverter {
                 return@withContext ConversionResult.Error("Only 16-bit WAV files are supported")
             }
             
-            // Determine output path
             val outputPath = m4aFilePath ?: wavFilePath.replace(".wav", ".m4a", ignoreCase = true)
             val outputFile = File(outputPath)
             
@@ -113,6 +119,13 @@ object WavToM4aConverter {
                 return@withContext ConversionResult.Error("Output file is empty or missing")
             }
             
+            // Verify output has a readable audio track (moov atom is intact)
+            if (!verifyOutputHasAudioTrack(outputPath)) {
+                Logger.e("[WavToM4a] Output M4A has no audio track — container is corrupt, keeping WAV")
+                outputFile.delete()
+                return@withContext ConversionResult.Error("Output M4A has no audio track (corrupt container)")
+            }
+            
             // Calculate duration in milliseconds
             val durationMs = if (wavHeader.byteRate > 0) {
                 (wavHeader.dataSize * 1000L) / wavHeader.byteRate
@@ -122,13 +135,19 @@ object WavToM4aConverter {
             
             Logger.d("[WavToM4a] Conversion successful: ${outputFile.length()} bytes, ${durationMs}ms")
             
-            // Validate output file size is reasonable compared to input
+            // Validate output file size is reasonable compared to input.
+            // A truncated encoding produces a small M4A that may have valid
+            // container metadata (passes MediaExtractor) but no readable samples
+            // (fails MediaMetadataRetriever). Delete it and return Error so the
+            // WAV is preserved for retry.
             val inputSize = wavFile.length()
             val outputSize = outputFile.length()
             if (inputSize > 0 && outputSize < inputSize * 0.05) {
-                // Output is suspiciously small (less than 5% of input)
-                Logger.w("[WavToM4a] Output file too small: input=${inputSize}, output=${outputSize}. Keeping WAV file.")
-                return@withContext ConversionResult.Success(outputPath, durationMs)
+                Logger.e("[WavToM4a] Output file too small (truncated encoding): input=${inputSize}, output=${outputSize}. Deleting corrupt M4A, keeping WAV.")
+                outputFile.delete()
+                return@withContext ConversionResult.Error(
+                    "Encoding truncated: output ${outputSize}B is only ${(outputSize * 100) / inputSize}% of input ${inputSize}B"
+                )
             }
             
             // Delete WAV file if requested (only after validation)
@@ -164,8 +183,16 @@ object WavToM4aConverter {
                 return ConversionResult.Error("WAV file not found: $wavFilePath")
             }
             
-            val wavHeader = parseWavHeader(wavFilePath)
-                ?: return ConversionResult.Error("Invalid WAV file format")
+            var wavHeader = parseWavHeader(wavFilePath)
+            if (wavHeader == null) {
+                Logger.w("[WavToM4a] Header parse failed, attempting repair: $wavFilePath")
+                if (WavRecorder.repairWavFile(wavFilePath)) {
+                    wavHeader = parseWavHeader(wavFilePath)
+                }
+                if (wavHeader == null) {
+                    return ConversionResult.Error("Invalid WAV file format")
+                }
+            }
             
             if (wavHeader.audioFormat != 1) {
                 return ConversionResult.Error("Only PCM WAV files are supported")
@@ -200,6 +227,13 @@ object WavToM4aConverter {
                 return ConversionResult.Error("Output file is empty or missing")
             }
             
+            // Verify output has a readable audio track (moov atom is intact)
+            if (!verifyOutputHasAudioTrack(outputPath)) {
+                Logger.e("[WavToM4a] convertSync: Output M4A has no audio track — container is corrupt, keeping WAV")
+                outputFile.delete()
+                return ConversionResult.Error("Output M4A has no audio track (corrupt container)")
+            }
+            
             val durationMs = if (wavHeader.byteRate > 0) {
                 (wavHeader.dataSize * 1000L) / wavHeader.byteRate
             } else {
@@ -209,9 +243,12 @@ object WavToM4aConverter {
             // Validate output file size before deleting WAV
             val inputSize = wavFile.length()
             val outputSize = outputFile.length()
-            if (deleteWavAfterConversion && inputSize > 0 && outputSize < inputSize * 0.05) {
-                Logger.w("[WavToM4a] Output file too small: input=${inputSize}, output=${outputSize}. Keeping WAV file.")
-                return ConversionResult.Success(outputPath, durationMs)
+            if (inputSize > 0 && outputSize < inputSize * 0.05) {
+                Logger.e("[WavToM4a] convertSync: Output file too small (truncated encoding): input=${inputSize}, output=${outputSize}. Deleting corrupt M4A, keeping WAV.")
+                outputFile.delete()
+                return ConversionResult.Error(
+                    "Encoding truncated: output ${outputSize}B is only ${(outputSize * 100) / inputSize}% of input ${inputSize}B"
+                )
             }
             
             if (deleteWavAfterConversion) {
@@ -230,6 +267,54 @@ object WavToM4aConverter {
         }
     }
     
+    /**
+     * Verify the output M4A has a readable audio track AND that
+     * MediaMetadataRetriever can extract its duration. MediaExtractor alone
+     * is not sufficient — it can find track headers in M4A files whose sample
+     * tables are corrupt, which then fail at playback / getAudioDuration time.
+     */
+    private fun verifyOutputHasAudioTrack(filePath: String): Boolean {
+        // Step 1: verify MediaExtractor can find an audio track
+        val extractor = MediaExtractor()
+        val hasTrack = try {
+            extractor.setDataSource(filePath)
+            var found = false
+            for (i in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) { found = true; break }
+            }
+            found
+        } catch (e: Exception) {
+            Logger.w("[WavToM4a] MediaExtractor verification failed: ${e.message}")
+            false
+        } finally {
+            try { extractor.release() } catch (_: Exception) {}
+        }
+
+        if (!hasTrack) return false
+
+        // Step 2: verify MediaMetadataRetriever can read duration
+        // (catches corrupt sample tables that pass MediaExtractor)
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(filePath)
+            val durationMs = retriever.extractMetadata(
+                MediaMetadataRetriever.METADATA_KEY_DURATION
+            )?.toLongOrNull()
+            if (durationMs == null || durationMs <= 0L) {
+                Logger.w("[WavToM4a] MediaMetadataRetriever cannot read duration (track found but container corrupt)")
+                false
+            } else {
+                true
+            }
+        } catch (e: Exception) {
+            Logger.w("[WavToM4a] MediaMetadataRetriever verification failed: ${e.message}")
+            false
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
     /**
      * Parse WAV file header to extract audio parameters
      */
@@ -321,7 +406,12 @@ object WavToM4aConverter {
     }
     
     /**
-     * Encode PCM data from WAV file to AAC and mux into M4A container
+     * Encode PCM data from WAV file to AAC and mux into M4A container.
+     *
+     * For large files (>20 min), MediaMuxer.stop() MUST succeed to write the
+     * moov atom. If stop() fails, the M4A has raw AAC frames but no container
+     * metadata, making it unreadable ("no audio tracks"). This function ensures
+     * muxer finalization is part of the success path, not buried in finally.
      */
     private fun encodeToM4a(
         wavFilePath: String,
@@ -334,9 +424,9 @@ object WavToM4aConverter {
         var inputStream: FileInputStream? = null
         var muxerStarted = false
         var trackIndex = -1
+        var encodingSucceeded = false
         
         try {
-            // Create AAC encoder
             val mediaFormat = MediaFormat.createAudioFormat(
                 MediaFormat.MIMETYPE_AUDIO_AAC,
                 wavHeader.sampleRate,
@@ -344,17 +434,15 @@ object WavToM4aConverter {
             ).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, AAC_PROFILE)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536)
             }
             
             encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
             encoder.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             encoder.start()
             
-            // Create muxer
             muxer = MediaMuxer(m4aFilePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             
-            // Open WAV file for reading
             inputStream = FileInputStream(wavFilePath)
             inputStream.skip(wavHeader.dataOffset)
             
@@ -363,15 +451,13 @@ object WavToM4aConverter {
             var outputDone = false
             var presentationTimeUs = 0L
             
-            // Calculate bytes per sample for timing
             val bytesPerSample = wavHeader.numChannels * (wavHeader.bitsPerSample / 8)
             val samplesPerSecond = wavHeader.sampleRate.toLong()
             
-            val inputBuffer = ByteArray(4096)
+            val inputBuffer = ByteArray(65536)
             var totalBytesRead = 0L
             
             while (!outputDone) {
-                // Feed input
                 if (!inputDone) {
                     val inputBufferIndex = encoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
                     if (inputBufferIndex >= 0) {
@@ -394,7 +480,6 @@ object WavToM4aConverter {
                             codecInputBuffer?.put(inputBuffer, 0, bytesRead)
                             totalBytesRead += bytesRead
                             
-                            // Calculate presentation time
                             val samplesRead = totalBytesRead / bytesPerSample
                             presentationTimeUs = (samplesRead * 1000000L) / samplesPerSecond
                             
@@ -409,7 +494,6 @@ object WavToM4aConverter {
                     }
                 }
                 
-                // Get output
                 val outputBufferIndex = encoder.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)
                 
                 when {
@@ -434,7 +518,37 @@ object WavToM4aConverter {
                             outputDone = true
                         }
                     }
+                    else -> { /* codec busy, retry */ }
                 }
+            }
+            
+            // Finalize muxer BEFORE returning success.
+            // muxer.stop() writes the moov atom — without it the M4A is unreadable.
+            if (muxerStarted) {
+                try {
+                    muxer.stop()
+                } catch (e: Exception) {
+                    Logger.e("[WavToM4a] muxer.stop() FAILED — M4A container will be corrupt: ${e.message}", e)
+                    return false
+                }
+            } else {
+                Logger.e("[WavToM4a] Muxer was never started (no output format received from encoder)")
+                return false
+            }
+            
+            encodingSucceeded = true
+            
+            // Validate the output has a readable audio track
+            val outputFile = File(m4aFilePath)
+            if (!outputFile.exists() || outputFile.length() == 0L) {
+                Logger.e("[WavToM4a] Output file missing or empty after encoding")
+                return false
+            }
+            
+            val expectedMinSize = (wavHeader.dataSize * bitRate) / (wavHeader.sampleRate * wavHeader.numChannels * wavHeader.bitsPerSample)
+            if (outputFile.length() < expectedMinSize / 4) {
+                Logger.e("[WavToM4a] Output file suspiciously small: ${outputFile.length()}B (expected at least ${expectedMinSize / 4}B)")
+                return false
             }
             
             return true
@@ -457,7 +571,7 @@ object WavToM4aConverter {
             }
             
             try {
-                if (muxerStarted) {
+                if (!encodingSucceeded && muxerStarted) {
                     muxer?.stop()
                 }
                 muxer?.release()

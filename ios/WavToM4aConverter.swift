@@ -22,6 +22,16 @@ class WavToM4aConverter {
     /// Default AAC bit rate
     private static let defaultBitRate = 128000
     
+    /// Files larger than this threshold skip AVAssetExportSession and use
+    /// AVAssetWriter directly. ExportSession can produce 0-byte output for
+    /// extremely large WAV files on older iOS versions. The fallback catches
+    /// this via output validation, so a generous threshold avoids penalizing
+    /// the common 30-60 min recording range where ExportSession is 3-5x faster.
+    private static let exportSessionMaxInputBytes: UInt64 = 500_000_000
+    
+    private static let conversionGuardLock = NSLock()
+    private static var inProgressConversions: [String: DispatchSemaphore] = [:]
+    
     /**
      * Convert a WAV file to M4A format.
      *
@@ -119,8 +129,6 @@ class WavToM4aConverter {
         bitRate: Int = defaultBitRate,
         deleteWavAfterConversion: Bool = true
     ) -> ConversionResult {
-        let wavURL = URL(fileURLWithPath: wavFilePath)
-        
         guard FileManager.default.fileExists(atPath: wavFilePath) else {
             return .error(message: "WAV file not found: \(wavFilePath)")
         }
@@ -132,6 +140,46 @@ class WavToM4aConverter {
             let url = URL(fileURLWithPath: wavFilePath)
             outputPath = url.deletingPathExtension().appendingPathExtension("m4a").path
         }
+
+        // --- Deduplication guard ---
+        // If another thread is already converting to the same output path,
+        // wait for it to finish and reuse the result instead of converting twice.
+        conversionGuardLock.lock()
+        if let existingSemaphore = inProgressConversions[outputPath] {
+            conversionGuardLock.unlock()
+            let outputName = outputPath.components(separatedBy: "/").last ?? outputPath
+            print("[WavToM4a] Conversion already in progress for \(outputName), waiting...")
+            existingSemaphore.wait()
+            existingSemaphore.signal() // re-signal so other waiters (if any) also unblock
+
+            if FileManager.default.fileExists(atPath: outputPath) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: outputPath)
+                let size = (attrs?[.size] as? Int64) ?? 0
+                if size > 0 {
+                    let asset = AVAsset(url: URL(fileURLWithPath: outputPath))
+                    let duration = asset.duration.seconds
+                    print("[WavToM4a] Reusing result from concurrent conversion: \(outputName) (\(size)B, \(String(format: "%.2f", duration))s)")
+                    return .success(outputPath: outputPath, duration: duration)
+                }
+            }
+            print("[WavToM4a] Concurrent conversion finished but output missing/empty, proceeding with own conversion")
+            // Fall through to do our own conversion
+            conversionGuardLock.lock()
+        }
+
+        let semaphoreForThis = DispatchSemaphore(value: 0)
+        inProgressConversions[outputPath] = semaphoreForThis
+        conversionGuardLock.unlock()
+
+        defer {
+            conversionGuardLock.lock()
+            inProgressConversions.removeValue(forKey: outputPath)
+            conversionGuardLock.unlock()
+            semaphoreForThis.signal()
+        }
+
+        // --- Actual conversion ---
+        let wavURL = URL(fileURLWithPath: wavFilePath)
         let outputURL = URL(fileURLWithPath: outputPath)
         
         if FileManager.default.fileExists(atPath: outputPath) {
@@ -144,25 +192,28 @@ class WavToM4aConverter {
         let outputName = outputPath.components(separatedBy: "/").last ?? outputPath
         print("[WavToM4a] Converting: \(inputName) (\(inputSize)B) → \(outputName)")
         
-        // --- Primary path: AVAssetExportSession ---
-        let exportResult = convertViaExportSession(
-            wavURL: wavURL,
-            outputURL: outputURL,
-            outputPath: outputPath,
-            deleteWavAfterConversion: deleteWavAfterConversion,
-            wavFilePath: wavFilePath
-        )
+        let skipExportSession = inputSize > exportSessionMaxInputBytes
         
-        switch exportResult {
-        case .success:
-            return exportResult
-        case .error(let exportError):
-            print("[WavToM4a] ExportSession failed (\(exportError)), trying AVAssetWriter fallback...")
-            // Clean up any partial output before fallback attempt
-            cleanupFailedOutput(outputPath)
+        if skipExportSession {
+            print("[WavToM4a] Large file (\(inputSize)B > \(exportSessionMaxInputBytes)B threshold), using AVAssetWriter directly")
+        } else {
+            let exportResult = convertViaExportSession(
+                wavURL: wavURL,
+                outputURL: outputURL,
+                outputPath: outputPath,
+                deleteWavAfterConversion: deleteWavAfterConversion,
+                wavFilePath: wavFilePath
+            )
+            
+            switch exportResult {
+            case .success:
+                return exportResult
+            case .error(let exportError):
+                print("[WavToM4a] ExportSession failed (\(exportError)), trying AVAssetWriter fallback...")
+                cleanupFailedOutput(outputPath)
+            }
         }
         
-        // --- Fallback: AVAssetReader + AVAssetWriter ---
         let writerResult = convertViaAssetWriter(
             wavURL: wavURL,
             outputURL: outputURL,
@@ -232,7 +283,22 @@ class WavToM4aConverter {
         
         switch exportSession.status {
         case .completed:
-            let duration = assetDuration.seconds
+            var duration = assetDuration.seconds
+            // For large WAV files, AVAsset.duration might be 0 or invalid.
+            // Fall back to calculation from file size.
+            if duration <= 0 || duration.isNaN || duration.isInfinite {
+                let formatDescs = audioTrack.formatDescriptions as? [CMFormatDescription] ?? []
+                if let fmt = formatDescs.first,
+                   let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee {
+                    duration = calculateWavDuration(
+                        fileURL: wavURL,
+                        sampleRate: asbd.mSampleRate,
+                        channels: asbd.mChannelsPerFrame,
+                        bitsPerSample: UInt32(asbd.mBitsPerChannel > 0 ? asbd.mBitsPerChannel : 16)
+                    )
+                    print("[WavToM4a] ExportSession: AVAsset.duration invalid, calculated: \(String(format: "%.2f", duration))s")
+                }
+            }
             return validateAndFinalize(
                 outputPath: outputPath,
                 duration: duration,
@@ -252,6 +318,22 @@ class WavToM4aConverter {
     }
 
     // MARK: - AVAssetWriter (legacy fallback)
+
+    /// Calculate WAV duration from file size and format info (reliable for large files
+    /// where AVAsset.duration may return 0/invalid).
+    private static func calculateWavDuration(fileURL: URL, sampleRate: Double, channels: UInt32, bitsPerSample: UInt32) -> TimeInterval {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let fileSize = attrs[.size] as? UInt64,
+              sampleRate > 0, channels > 0, bitsPerSample > 0 else {
+            return 0
+        }
+        let headerSize: UInt64 = 44
+        let dataSize = fileSize > headerSize ? fileSize - headerSize : 0
+        let bytesPerSample = UInt64(channels) * UInt64(bitsPerSample / 8)
+        guard bytesPerSample > 0 else { return 0 }
+        let totalSamples = dataSize / bytesPerSample
+        return Double(totalSamples) / sampleRate
+    }
 
     private static func convertViaAssetWriter(
         wavURL: URL,
@@ -282,7 +364,20 @@ class WavToM4aConverter {
         let sampleRate = sourceFormat.mSampleRate
         let channels = sourceFormat.mChannelsPerFrame
         
-        print("[WavToM4a] AssetWriter: source \(sampleRate)Hz, \(channels)ch, bitRate=\(bitRate)")
+        // For large WAV files, AVAsset.duration can return 0 or invalid.
+        // Calculate from file size as a reliable fallback.
+        var duration = assetDurationValue.seconds
+        if duration <= 0 || duration.isNaN || duration.isInfinite {
+            duration = calculateWavDuration(
+                fileURL: wavURL,
+                sampleRate: sampleRate,
+                channels: channels,
+                bitsPerSample: UInt32(sourceFormat.mBitsPerChannel > 0 ? sourceFormat.mBitsPerChannel : 16)
+            )
+            print("[WavToM4a] AssetWriter: AVAsset.duration invalid, calculated from file size: \(String(format: "%.2f", duration))s")
+        }
+        
+        print("[WavToM4a] AssetWriter: source \(sampleRate)Hz, \(channels)ch, bitRate=\(bitRate), duration=\(String(format: "%.2f", duration))s")
         
         guard let reader = try? AVAssetReader(asset: asset) else {
             return .error(message: "AssetWriter: Failed to create asset reader")
@@ -342,6 +437,13 @@ class WavToM4aConverter {
         var conversionError: String? = nil
         var samplesWritten = 0
         
+        // Estimate expected buffer count to detect premature reader completion.
+        // Each PCM buffer from AVAssetReaderTrackOutput is typically 8192-32768 frames.
+        // For 1200s at 44100Hz, that's ~52M frames / 8192 ≈ 6400 buffers minimum.
+        let expectedMinBuffers: Int = duration > 10
+            ? Int(duration * sampleRate / 32768.0) // conservative estimate
+            : 0
+        
         writerInput.requestMediaDataWhenReady(on: queue) {
             while writerInput.isReadyForMoreMediaData {
                 if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
@@ -358,6 +460,9 @@ class WavToM4aConverter {
                     if reader.status == .failed {
                         conversionError = "Reader failed: \(detailedError(reader.error))"
                         print("[WavToM4a] AssetWriter reader FAILED: \(detailedError(reader.error))")
+                    } else if expectedMinBuffers > 0 && samplesWritten < expectedMinBuffers / 2 {
+                        conversionError = "Reader completed prematurely: only \(samplesWritten) buffers (expected ≥\(expectedMinBuffers / 2) for \(String(format: "%.0f", duration))s)"
+                        print("[WavToM4a] AssetWriter PREMATURE completion: \(samplesWritten) buffers vs \(expectedMinBuffers) expected")
                     } else {
                         print("[WavToM4a] AssetWriter encoding done, \(samplesWritten) buffers written")
                     }
@@ -385,7 +490,6 @@ class WavToM4aConverter {
             return .error(message: "Writer failed: \(writer.error?.localizedDescription ?? "unknown")")
         }
         
-        let duration = assetDurationValue.seconds
         return validateAndFinalize(
             outputPath: outputPath,
             duration: duration,
@@ -408,9 +512,10 @@ class WavToM4aConverter {
             return .error(message: "\(method): Output file was not created")
         }
         
+        let fileSize: Int64
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: outputPath)
-            let fileSize = attributes[.size] as? Int64 ?? 0
+            fileSize = attributes[.size] as? Int64 ?? 0
             print("[WavToM4a] \(method) OK: output=\(fileSize)B, duration=\(String(format: "%.2f", duration))s")
             
             if fileSize == 0 {
@@ -419,18 +524,36 @@ class WavToM4aConverter {
             }
         } catch {
             print("[WavToM4a] WARN: Could not get file attributes: \(error)")
+            fileSize = 0
         }
         
-        if duration > 0 {
-            let outputAsset = AVAsset(url: URL(fileURLWithPath: outputPath))
-            let outputDuration = outputAsset.duration.seconds
+        // Always verify the output M4A has a readable audio track.
+        let outputAsset = AVAsset(url: URL(fileURLWithPath: outputPath))
+        let outputTracks = outputAsset.tracks(withMediaType: .audio)
+        if outputTracks.isEmpty {
+            print("[WavToM4a] CRITICAL: Output M4A has no audio tracks — container is corrupt")
+            cleanupFailedOutput(outputPath)
+            return .error(message: "\(method): Output M4A has no audio tracks (corrupt container) — WAV preserved for retry")
+        }
+        
+        let outputDuration = outputAsset.duration.seconds
+        
+        if duration > 0 && outputDuration > 0 {
             let tolerance = max(duration * 0.1, 0.5)
-            
             let durationDiff: Double = Swift.abs(outputDuration - duration)
             if durationDiff > tolerance {
                 print("[WavToM4a] WARN: Duration mismatch src=\(String(format: "%.2f", duration))s vs out=\(String(format: "%.2f", outputDuration))s — deleting M4A, keeping WAV")
                 cleanupFailedOutput(outputPath)
                 return .error(message: "\(method): Duration mismatch (src=\(String(format: "%.2f", duration))s, out=\(String(format: "%.2f", outputDuration))s) — WAV preserved for retry")
+            }
+        } else if duration > 60 && outputDuration <= 0 {
+            // For long recordings where we can't verify the output duration,
+            // check that file size is reasonable (AAC at 128kbps ~ 16KB/s)
+            let expectedMinBytes = Int64(duration * 8000) // ~64kbps minimum
+            if fileSize < expectedMinBytes {
+                print("[WavToM4a] WARN: Output too small for \(String(format: "%.0f", duration))s: \(fileSize)B < \(expectedMinBytes)B expected minimum")
+                cleanupFailedOutput(outputPath)
+                return .error(message: "\(method): Output file too small (\(fileSize)B) for \(String(format: "%.0f", duration))s recording — WAV preserved for retry")
             }
         }
         

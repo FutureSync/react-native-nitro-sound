@@ -39,6 +39,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     private var playbackRate: Double = 1.0 // default 1x
     private var recordingSession: AVAudioSession?
     private var tempAudioFile: URL? // Temporary file for remote audio playback
+    private var streamingEncoder: StreamingM4aEncoder?
 
     // MARK: - Recording Methods
 
@@ -251,6 +252,12 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
 
                             if started {
                                 self.startRecordTimer()
+
+                                let encoder = StreamingM4aEncoder(wavFilePath: fileURL.path)
+                                if encoder.start() {
+                                    self.streamingEncoder = encoder
+                                }
+
                                 promise.resolve(withResult: fileURL.absoluteString)
                             } else if recordAttempts < maxAttempts {
                                 print("🎙️ Recording attempt \(recordAttempts) failed, retrying in 0.3s...")
@@ -439,6 +446,9 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 self.audioRecorder = nil
             }
 
+            self.streamingEncoder?.cleanup()
+            self.streamingEncoder = nil
+
             self.stopRecordTimer()
             self.removeInterruptionObserver()
 
@@ -475,7 +485,6 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     self.stopRecordTimer()
                     self.removeInterruptionObserver()
                     
-                    // Return WAV immediately so JS can dismiss UI; convert via restoreRecording / app pipeline.
                     DispatchQueue.global(qos: .userInitiated).async {
                         self.audioRecorder = nil
 
@@ -485,11 +494,18 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
 
                         _ = self.repairWavFile(wavPath)
 
+                        // Finalize the streaming M4A encoder so companion .m4a is ready
+                        // before mergeAudioFiles is called.
+                        if let encoder = self.streamingEncoder {
+                            encoder.finalize()
+                            self.streamingEncoder = nil
+                        }
+
                         guard FileManager.default.fileExists(atPath: wavPath) else {
                             promise.reject(withError: RuntimeError.error(withMessage: "Recording file not found after stop: \(wavPath)"))
                             return
                         }
-                        print("[stopRecorder] returning WAV; JS will convert via restoreRecording: \(wavPath)")
+                        print("[stopRecorder] returning WAV: \(wavPath)")
                         promise.resolve(withResult: wavURL.absoluteString)
                     }
                 }
@@ -1402,8 +1418,45 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
                 }
 
-                // Single WAV file: convert WAV→M4A, reject if conversion fails
-                // (auto-resend will retry later when AAC encoder is available)
+                // Promote WAV inputs that have a companion streaming-encoded M4A
+                var promotedPaths: [String] = []
+                var hasPromotedAll = true
+                for raw in filePaths {
+                    let std = (raw as NSString).standardizingPath
+                    if std.lowercased().hasSuffix(".wav") {
+                        let companionM4a = (std as NSString).deletingPathExtension + ".m4a"
+                        if FileManager.default.fileExists(atPath: companionM4a),
+                           let attrs = try? FileManager.default.attributesOfItem(atPath: companionM4a),
+                           let size = attrs[.size] as? UInt64, size > 0 {
+                            print("[Merge] Using streaming M4A for \((std as NSString).lastPathComponent)")
+                            promotedPaths.append(companionM4a)
+                        } else {
+                            hasPromotedAll = false
+                            promotedPaths.append(std)
+                        }
+                    } else {
+                        promotedPaths.append(std)
+                    }
+                }
+
+                // Fast path: single file already M4A (streaming-encoded) → just copy
+                if promotedPaths.count == 1 && !promotedPaths[0].lowercased().hasSuffix(".wav") {
+                    let src = promotedPaths[0]
+                    let m4aOut = (resolvedOutputPath as NSString).deletingPathExtension + ".m4a"
+                    let outURL = URL(fileURLWithPath: m4aOut)
+                    if FileManager.default.fileExists(atPath: m4aOut) {
+                        try? FileManager.default.removeItem(at: outURL)
+                    }
+                    try FileManager.default.copyItem(atPath: src, toPath: m4aOut)
+                    let asset = AVAsset(url: outURL)
+                    let duration = asset.duration.seconds
+                    let outSize = (try? FileManager.default.attributesOfItem(atPath: m4aOut)[.size] as? UInt64) ?? 0
+                    print("[Merge] COMPLETE (streaming copy): \((m4aOut as NSString).lastPathComponent), dur=\(String(format: "%.2f", duration))s, size=\(outSize)B")
+                    promise.resolve(withResult: MergeResult(outputPath: m4aOut, duration: duration, inputCount: 1))
+                    return
+                }
+
+                // Single WAV file (no companion M4A): convert WAV→M4A, reject if conversion fails
                 if filePaths.count == 1 {
                     let singlePath = (filePaths[0] as NSString).standardizingPath
                     if singlePath.lowercased().hasSuffix(".wav") {
@@ -1430,12 +1483,15 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     }
                 }
 
-                // ---- Multi-file merge using AVMutableComposition + AVAssetExportSession ----
-                print("[Merge] Starting multi-file merge: \(filePaths.count) files → \(resolvedOutputPath)")
+                // ---- Multi-file merge using AVMutableComposition ----
+                // Use promoted paths (WAV→M4A where companion exists)
+                let mergePaths = promotedPaths
+                print("[Merge] Starting multi-file merge: \(mergePaths.count) files → \(resolvedOutputPath)")
 
                 var totalSize: UInt64 = 0
-                var totalDuration: Double = 0
+                var totalInputDuration: Double = 0
                 var inputCount = 0
+                var hasWavInput = false
 
                 print("[Merge] Collecting input files...")
 
@@ -1450,10 +1506,9 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
 
                 var currentTime = CMTime.zero
 
-                for raw in filePaths {
-                    let std = (raw as NSString).standardizingPath
-
+                for std in mergePaths {
                     if std.lowercased().hasSuffix(".wav") {
+                        hasWavInput = true
                         _ = self.repairWavFile(std)
                     }
 
@@ -1469,7 +1524,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     }
 
                     let dur = asset.duration
-                    totalDuration += dur.seconds
+                    totalInputDuration += dur.seconds
                     print("[Merge] Input[\(inputCount)]: \(std.components(separatedBy: "/").last ?? std), size=\(fileSize)B, dur=\(String(format: "%.2f", dur.seconds))s")
 
                     let timeRange = CMTimeRange(start: .zero, duration: dur)
@@ -1482,14 +1537,12 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     }
                 }
 
-                print("[Merge] Total input: \(inputCount) files, \(String(format: "%.2f", Double(totalSize) / 1024.0))KB, \(String(format: "%.2f", totalDuration))s")
+                print("[Merge] Total input: \(inputCount) files, \(String(format: "%.2f", Double(totalSize) / 1024.0))KB, \(String(format: "%.2f", totalInputDuration))s, hasWav=\(hasWavInput)")
 
                 guard inputCount > 0 else {
                     promise.reject(withError: RuntimeError.error(withMessage: "No audio tracks found in input files"))
                     return
                 }
-
-                let preset = AVAssetExportPresetAppleM4A
 
                 let m4aOutputPath = (resolvedOutputPath as NSString).deletingPathExtension + ".m4a"
                 let m4aOutputURL = URL(fileURLWithPath: m4aOutputPath)
@@ -1498,47 +1551,84 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     try? FileManager.default.removeItem(at: m4aOutputURL)
                 }
 
-                guard let exportSession = AVAssetExportSession(asset: composition, presetName: preset) else {
-                    promise.reject(withError: RuntimeError.error(withMessage: "Failed to create export session"))
-                    return
+                // When all inputs are already M4A/AAC, use passthrough (no re-encoding).
+                // When any input is WAV (PCM), must encode to AAC.
+                let usePassthrough = !hasWavInput
+                let exportResult: MergePathResult
+
+                if usePassthrough {
+                    print("[Merge] All inputs are M4A — using passthrough (no re-encode)")
+                    exportResult = self.mergeViaPassthrough(
+                        composition: composition,
+                        outputURL: m4aOutputURL,
+                        outputPath: m4aOutputPath
+                    )
+                } else {
+                    exportResult = self.mergeViaExportSession(
+                        composition: composition,
+                        outputURL: m4aOutputURL,
+                        outputPath: m4aOutputPath
+                    )
                 }
-                exportSession.outputURL = m4aOutputURL
-                exportSession.outputFileType = .m4a
 
-                print("[Merge] Exporting with preset=\(preset)...")
-
-                let exportSemaphore = DispatchSemaphore(value: 0)
-                exportSession.exportAsynchronously { exportSemaphore.signal() }
-                exportSemaphore.wait()
-
-                switch exportSession.status {
-                case .completed:
-                    let m4aAttrs = try? FileManager.default.attributesOfItem(atPath: m4aOutputPath)
-                    let m4aSize = (m4aAttrs?[.size] as? UInt64) ?? 0
-                    print("[Merge] Export DONE: M4A=\(String(format: "%.2f", Double(m4aSize) / 1024.0))KB, path=\(m4aOutputPath)")
-
-                    if resolvedOutputPath != m4aOutputPath {
-                        try? FileManager.default.removeItem(atPath: resolvedOutputPath)
+                if case .success = exportResult {
+                    // success handled below
+                } else {
+                    // Fallback: AVAssetReader/AVAssetWriter (handles AAC encoder unavailability)
+                    print("[Merge] Primary export failed, trying AVAssetWriter fallback...")
+                    if FileManager.default.fileExists(atPath: m4aOutputPath) {
+                        try? FileManager.default.removeItem(atPath: m4aOutputPath)
                     }
 
-                    print("[Merge] COMPLETE: finalPath=\(m4aOutputPath), duration=\(String(format: "%.2f", totalDuration))s, inputs=\(inputCount)")
-                    let result = MergeResult(
-                        outputPath: m4aOutputPath,
-                        duration: totalDuration,
-                        inputCount: Double(inputCount)
+                    let fallbackResult = self.mergeViaAssetWriter(
+                        composition: composition,
+                        outputURL: m4aOutputURL,
+                        outputPath: m4aOutputPath
                     )
-                    promise.resolve(withResult: result)
-
-                case .failed, .cancelled:
-                    let errMsg = exportSession.error?.localizedDescription ?? "unknown"
-                    print("[Merge] Export FAILED: \(errMsg)")
-                    promise.reject(withError: RuntimeError.error(withMessage: "Export failed: \(errMsg)"))
-
-                default:
-                    let statusCode = exportSession.status.rawValue
-                    print("[Merge] Export unexpected status: \(statusCode)")
-                    promise.reject(withError: RuntimeError.error(withMessage: "Unexpected export status: \(statusCode)"))
+                    if case .error(let msg) = fallbackResult {
+                        print("[Merge] AssetWriter fallback also FAILED: \(msg)")
+                        promise.reject(withError: RuntimeError.error(withMessage: "Merge failed (both paths): \(msg)"))
+                        return
+                    }
                 }
+
+                // --- Output validation ---
+                guard FileManager.default.fileExists(atPath: m4aOutputPath) else {
+                    promise.reject(withError: RuntimeError.error(withMessage: "Merge output file was not created"))
+                    return
+                }
+
+                let m4aAttrs = try? FileManager.default.attributesOfItem(atPath: m4aOutputPath)
+                let m4aSize = (m4aAttrs?[.size] as? UInt64) ?? 0
+                if m4aSize == 0 {
+                    try? FileManager.default.removeItem(atPath: m4aOutputPath)
+                    promise.reject(withError: RuntimeError.error(withMessage: "Merge output file is empty (0 bytes)"))
+                    return
+                }
+
+                // Measure actual output duration from the file
+                let outputAsset = AVAsset(url: m4aOutputURL)
+                let actualDuration = outputAsset.duration.seconds
+
+                if totalInputDuration > 0 && actualDuration > 0 {
+                    let tolerance = max(totalInputDuration * 0.1, 0.5)
+                    let durationDiff = Swift.abs(actualDuration - totalInputDuration)
+                    if durationDiff > tolerance {
+                        print("[Merge] WARN: Duration mismatch input=\(String(format: "%.2f", totalInputDuration))s vs output=\(String(format: "%.2f", actualDuration))s")
+                    }
+                }
+
+                if resolvedOutputPath != m4aOutputPath {
+                    try? FileManager.default.removeItem(atPath: resolvedOutputPath)
+                }
+
+                print("[Merge] COMPLETE: finalPath=\(m4aOutputPath), duration=\(String(format: "%.2f", actualDuration))s (input=\(String(format: "%.2f", totalInputDuration))s), inputs=\(inputCount), size=\(String(format: "%.2f", Double(m4aSize) / 1024.0))KB")
+                let result = MergeResult(
+                    outputPath: m4aOutputPath,
+                    duration: actualDuration.isNaN || actualDuration <= 0 ? totalInputDuration : actualDuration,
+                    inputCount: Double(inputCount)
+                )
+                promise.resolve(withResult: result)
             } catch {
                 promise.reject(withError: RuntimeError.error(withMessage: error.localizedDescription))
             }
@@ -1694,6 +1784,223 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
         return true
     }
 
+    // MARK: - Multi-file merge strategies
+
+    private enum MergePathResult {
+        case success
+        case error(message: String)
+    }
+
+    /// Passthrough merge: copies AAC frames without re-encoding.
+    /// Only valid when all inputs are already M4A/AAC with compatible format.
+    private func mergeViaPassthrough(
+        composition: AVMutableComposition,
+        outputURL: URL,
+        outputPath: String
+    ) -> MergePathResult {
+        let preset = AVAssetExportPresetPassthrough
+
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: preset) else {
+            print("[Merge] Passthrough preset not available, falling back to AppleM4A")
+            return mergeViaExportSession(composition: composition, outputURL: outputURL, outputPath: outputPath)
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+
+        print("[Merge] ExportSession: exporting with preset=Passthrough (no re-encode)...")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        exportSession.exportAsynchronously { semaphore.signal() }
+        semaphore.wait()
+
+        switch exportSession.status {
+        case .completed:
+            print("[Merge] Passthrough ExportSession: completed")
+            return .success
+        case .failed, .cancelled:
+            let errMsg = exportSession.error?.localizedDescription ?? "unknown"
+            print("[Merge] Passthrough FAILED (\(errMsg)), falling back to AppleM4A re-encode")
+            if FileManager.default.fileExists(atPath: outputPath) {
+                try? FileManager.default.removeItem(atPath: outputPath)
+            }
+            return mergeViaExportSession(composition: composition, outputURL: outputURL, outputPath: outputPath)
+        default:
+            let statusCode = exportSession.status.rawValue
+            print("[Merge] Passthrough unexpected status: \(statusCode)")
+            return mergeViaExportSession(composition: composition, outputURL: outputURL, outputPath: outputPath)
+        }
+    }
+
+    /// Encoding merge path: AVAssetExportSession with AVAssetExportPresetAppleM4A.
+    /// Used when inputs contain WAV (PCM) that needs AAC encoding.
+    private func mergeViaExportSession(
+        composition: AVMutableComposition,
+        outputURL: URL,
+        outputPath: String
+    ) -> MergePathResult {
+        let preset = AVAssetExportPresetAppleM4A
+
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: preset) else {
+            return .error(message: "Failed to create export session (preset not available)")
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+
+        print("[Merge] ExportSession: exporting with preset=\(preset)...")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        exportSession.exportAsynchronously { semaphore.signal() }
+        semaphore.wait()
+
+        switch exportSession.status {
+        case .completed:
+            print("[Merge] ExportSession: completed")
+            return .success
+        case .failed, .cancelled:
+            let errMsg = exportSession.error?.localizedDescription ?? "unknown"
+            print("[Merge] ExportSession FAILED: \(errMsg)")
+            return .error(message: "ExportSession failed: \(errMsg)")
+        default:
+            let statusCode = exportSession.status.rawValue
+            print("[Merge] ExportSession unexpected status: \(statusCode)")
+            return .error(message: "ExportSession unexpected status: \(statusCode)")
+        }
+    }
+
+    /// Fallback merge path: AVAssetReader/AVAssetWriter pipeline.
+    /// Handles cases where the hardware AAC encoder is temporarily unavailable
+    /// (e.g. after audio session interruption from Siri or phone call).
+    private func mergeViaAssetWriter(
+        composition: AVMutableComposition,
+        outputURL: URL,
+        outputPath: String,
+        bitRate: Int = 128000
+    ) -> MergePathResult {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        do {
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+        } catch {
+            print("[Merge] AssetWriter: Audio session activation failed: \(error)")
+        }
+
+        let tracks = composition.tracks(withMediaType: .audio)
+        guard let audioTrack = tracks.first else {
+            return .error(message: "AssetWriter: No audio track in composition")
+        }
+
+        let formatDescriptions = audioTrack.formatDescriptions as? [CMFormatDescription] ?? []
+        var sampleRate: Double = 44100
+        var channels: UInt32 = 1
+        if let fmt = formatDescriptions.first,
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee {
+            sampleRate = asbd.mSampleRate
+            channels = asbd.mChannelsPerFrame
+        }
+
+        print("[Merge] AssetWriter: source \(sampleRate)Hz, \(channels)ch, bitRate=\(bitRate)")
+
+        guard let reader = try? AVAssetReader(asset: composition) else {
+            return .error(message: "AssetWriter: Failed to create asset reader")
+        }
+
+        let readerOutputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+
+        let readerOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: readerOutputSettings)
+        guard reader.canAdd(readerOutput) else {
+            return .error(message: "AssetWriter: Cannot add reader output")
+        }
+        reader.add(readerOutput)
+
+        guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .m4a) else {
+            return .error(message: "AssetWriter: Failed to create asset writer")
+        }
+
+        var channelLayout = AudioChannelLayout()
+        channelLayout.mChannelLayoutTag = channels == 2
+            ? kAudioChannelLayoutTag_Stereo
+            : kAudioChannelLayoutTag_Mono
+        let channelLayoutData = Data(bytes: &channelLayout, count: MemoryLayout<AudioChannelLayout>.size)
+
+        let writerInputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVEncoderBitRateKey: bitRate,
+            AVChannelLayoutKey: channelLayoutData
+        ]
+
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: writerInputSettings)
+        writerInput.expectsMediaDataInRealTime = false
+        guard writer.canAdd(writerInput) else {
+            return .error(message: "AssetWriter: Cannot add writer input")
+        }
+        writer.add(writerInput)
+
+        guard reader.startReading() else {
+            return .error(message: "AssetWriter: Failed to start reading: \(reader.error?.localizedDescription ?? "unknown")")
+        }
+        guard writer.startWriting() else {
+            return .error(message: "AssetWriter: Failed to start writing: \(writer.error?.localizedDescription ?? "unknown")")
+        }
+        writer.startSession(atSourceTime: .zero)
+
+        let queue = DispatchQueue(label: "com.nitrosound.merge.assetwriter", qos: .default)
+        let semaphore = DispatchSemaphore(value: 0)
+        var conversionError: String?
+        var samplesWritten = 0
+
+        writerInput.requestMediaDataWhenReady(on: queue) {
+            while writerInput.isReadyForMoreMediaData {
+                if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
+                    if !writerInput.append(sampleBuffer) {
+                        conversionError = "Encode failed after \(samplesWritten) samples: \(writer.error?.localizedDescription ?? "encoder unavailable")"
+                        semaphore.signal()
+                        return
+                    }
+                    samplesWritten += 1
+                } else {
+                    writerInput.markAsFinished()
+                    if reader.status == .failed {
+                        conversionError = "Reader failed: \(reader.error?.localizedDescription ?? "unknown")"
+                    }
+                    semaphore.signal()
+                    return
+                }
+            }
+        }
+
+        semaphore.wait()
+
+        if let error = conversionError {
+            print("[Merge] AssetWriter FAILED: \(error)")
+            writer.cancelWriting()
+            return .error(message: error)
+        }
+
+        let finishSemaphore = DispatchSemaphore(value: 0)
+        writer.finishWriting { finishSemaphore.signal() }
+        finishSemaphore.wait()
+
+        if writer.status == .failed {
+            let errMsg = writer.error?.localizedDescription ?? "unknown"
+            print("[Merge] AssetWriter finishWriting FAILED: \(errMsg)")
+            return .error(message: "Writer failed: \(errMsg)")
+        }
+
+        print("[Merge] AssetWriter: completed (\(samplesWritten) buffers)")
+        return .success
+    }
+
     private static func durationSeconds(of fileURL: URL) throws -> Double {
         let asset = AVURLAsset(url: fileURL)
         let secs = CMTimeGetSeconds(asset.duration)
@@ -1781,6 +2088,8 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
         
         // Cleanup
         audioRecorder = nil
+        streamingEncoder?.cleanup()
+        streamingEncoder = nil
         try? recordingSession?.setActive(false)
         recordingSession = nil
         
@@ -1815,6 +2124,9 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                 // Repair WAV header immediately so the file is always in a
                 // consistent state regardless of when/whether restore runs.
                 _ = repairWavFile(wavPath)
+
+                streamingEncoder?.finalize()
+                streamingEncoder = nil
 
                 audioRecorder = nil
                 try? recordingSession?.setActive(false)
@@ -1865,6 +2177,8 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
         // Stop any active recording/playback
         audioRecorder?.stop()
         audioRecorder = nil
+        streamingEncoder?.cleanup()
+        streamingEncoder = nil
         audioPlayer?.stop()
         audioPlayer = nil
         

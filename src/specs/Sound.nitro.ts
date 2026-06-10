@@ -163,6 +163,7 @@ export interface MergeResult {
 }
 
 export type RecordBackListener = (recordingMeta: RecordBackType) => void;
+export type RecordingFaultListener = (reason: string) => void;
 export type PlayBackListener = (playbackMeta: PlayBackType) => void;
 export type PlaybackEndListener = (playbackEndMeta: PlaybackEndType) => void;
 
@@ -200,6 +201,8 @@ export interface Sound extends HybridObject<{
     callback: (recordingMeta: RecordBackType) => void
   ): void;
   removeRecordBackListener(): void;
+  addRecordingFaultListener(callback: (reason: string) => void): void;
+  removeRecordingFaultListener(): void;
   addPlayBackListener(callback: (playbackMeta: PlayBackType) => void): void;
   removePlayBackListener(): void;
   addPlaybackEndListener(

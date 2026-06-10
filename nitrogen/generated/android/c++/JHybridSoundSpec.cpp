@@ -73,6 +73,7 @@ namespace margelo::nitro::sound { struct PlaybackEndType; }
 #include "JFunc_void_RecordBackType.hpp"
 #include <NitroModules/JNICallable.hpp>
 #include "JRecordBackType.hpp"
+#include "JFunc_void_std__string.hpp"
 #include "PlayBackType.hpp"
 #include "JFunc_void_PlayBackType.hpp"
 #include "JPlayBackType.hpp"
@@ -304,6 +305,14 @@ namespace margelo::nitro::sound {
   }
   void JHybridSoundSpec::removeRecordBackListener() {
     static const auto method = javaClassStatic()->getMethod<void()>("removeRecordBackListener");
+    method(_javaPart);
+  }
+  void JHybridSoundSpec::addRecordingFaultListener(const std::function<void(const std::string& /* reason */)>& callback) {
+    static const auto method = javaClassStatic()->getMethod<void(jni::alias_ref<JFunc_void_std__string::javaobject> /* callback */)>("addRecordingFaultListener_cxx");
+    method(_javaPart, JFunc_void_std__string_cxx::fromCpp(callback));
+  }
+  void JHybridSoundSpec::removeRecordingFaultListener() {
+    static const auto method = javaClassStatic()->getMethod<void()>("removeRecordingFaultListener");
     method(_javaPart);
   }
   void JHybridSoundSpec::addPlayBackListener(const std::function<void(const PlayBackType& /* playbackMeta */)>& callback) {

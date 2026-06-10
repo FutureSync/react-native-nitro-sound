@@ -28,6 +28,8 @@ public protocol HybridSoundSpec_protocol: HybridObject {
   func setSubscriptionDuration(sec: Double) throws -> Void
   func addRecordBackListener(callback: @escaping (_ recordingMeta: RecordBackType) -> Void) throws -> Void
   func removeRecordBackListener() throws -> Void
+  func addRecordingFaultListener(callback: @escaping (_ reason: String) -> Void) throws -> Void
+  func removeRecordingFaultListener() throws -> Void
   func addPlayBackListener(callback: @escaping (_ playbackMeta: PlayBackType) -> Void) throws -> Void
   func removePlayBackListener() throws -> Void
   func addPlaybackEndListener(callback: @escaping (_ playbackEndMeta: PlaybackEndType) -> Void) throws -> Void

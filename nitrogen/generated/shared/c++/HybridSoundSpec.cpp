@@ -28,6 +28,8 @@ namespace margelo::nitro::sound {
       prototype.registerHybridMethod("setSubscriptionDuration", &HybridSoundSpec::setSubscriptionDuration);
       prototype.registerHybridMethod("addRecordBackListener", &HybridSoundSpec::addRecordBackListener);
       prototype.registerHybridMethod("removeRecordBackListener", &HybridSoundSpec::removeRecordBackListener);
+      prototype.registerHybridMethod("addRecordingFaultListener", &HybridSoundSpec::addRecordingFaultListener);
+      prototype.registerHybridMethod("removeRecordingFaultListener", &HybridSoundSpec::removeRecordingFaultListener);
       prototype.registerHybridMethod("addPlayBackListener", &HybridSoundSpec::addPlayBackListener);
       prototype.registerHybridMethod("removePlayBackListener", &HybridSoundSpec::removePlayBackListener);
       prototype.registerHybridMethod("addPlaybackEndListener", &HybridSoundSpec::addPlaybackEndListener);

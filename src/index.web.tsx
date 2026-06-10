@@ -285,6 +285,14 @@ class SoundWebImpl implements SoundType {
     this.recordBackListener = null;
   }
 
+  addRecordingFaultListener(_callback: (reason: string) => void): void {
+    // Web does not experience OEM mic suspension
+  }
+
+  removeRecordingFaultListener(): void {
+    // Web does not experience OEM mic suspension
+  }
+
   addPlayBackListener(callback: (playbackMeta: PlayBackType) => void): void {
     this.playBackListener = callback;
   }

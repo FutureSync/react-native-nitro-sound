@@ -107,6 +107,19 @@ abstract class HybridSoundSpec: HybridObject() {
   @Keep
   abstract fun removeRecordBackListener(): Unit
   
+  abstract fun addRecordingFaultListener(callback: (reason: String) -> Unit): Unit
+  
+  @DoNotStrip
+  @Keep
+  private fun addRecordingFaultListener_cxx(callback: Func_void_std__string): Unit {
+    val __result = addRecordingFaultListener(callback)
+    return __result
+  }
+  
+  @DoNotStrip
+  @Keep
+  abstract fun removeRecordingFaultListener(): Unit
+  
   abstract fun addPlayBackListener(callback: (playbackMeta: PlayBackType) -> Unit): Unit
   
   @DoNotStrip

@@ -767,6 +767,14 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
         self.stopRecordTimer()
     }
 
+    public func addRecordingFaultListener(callback: @escaping (String) -> Void) throws {
+        // iOS does not experience OEM mic suspension; stub for API parity
+    }
+
+    public func removeRecordingFaultListener() throws {
+        // iOS does not experience OEM mic suspension; stub for API parity
+    }
+
     public func addPlayBackListener(callback: @escaping (PlayBackType) -> Void) throws {
         self.playBackListener = callback
     }
@@ -982,15 +990,22 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
      * Prevents path traversal attacks by ensuring the path is under
      * the app's Documents, Library, tmp, or Caches directory.
      */
+    private static let appGroupId = "group.com.sync.future.AISchreiber"
+
     private static func validatePathSecurity(path: String) -> Bool {
         let canonicalPath = (path as NSString).standardizingPath
         
-        let allowedDirs: [String] = [
+        var allowedDirs: [String] = [
             FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path,
             FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.path,
             FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.path,
             NSTemporaryDirectory()
         ].compactMap { $0 }.map { ($0 as NSString).standardizingPath }
+
+        if let groupPath = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupId)?.path {
+            allowedDirs.append((groupPath as NSString).standardizingPath)
+        }
         
         return allowedDirs.contains { canonicalPath.hasPrefix($0) }
     }
@@ -1243,8 +1258,13 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
             print("🎙️ Starting record timer with interval: \(self.subscriptionDuration)")
             #endif
 
-            self.recordTimer = Timer.scheduledTimer(withTimeInterval: self.subscriptionDuration, repeats: true) { [weak self] _ in
-                // Use autoreleasepool to ensure temporary objects are released promptly during long recordings
+            // Use RunLoop .common mode so the timer continues to fire when
+            // the app is in the background (screen off). The default
+            // Timer.scheduledTimer uses .default mode which is suspended
+            // by iOS when the app enters background, stopping all metering
+            // callbacks even though AVAudioRecorder keeps recording
+            // (via UIBackgroundModes: audio).
+            let timer = Timer(timeInterval: self.subscriptionDuration, repeats: true) { [weak self] _ in
                 autoreleasepool {
                     guard let self = self,
                           let recorder = self.audioRecorder,
@@ -1253,7 +1273,6 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                         return
                     }
 
-                    // Only update meters if metering is enabled
                     if recorder.isMeteringEnabled {
                         recorder.updateMeters()
                     }
@@ -1271,9 +1290,11 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                     self.recordBackListener?(recordBack)
                 }
             }
+            RunLoop.main.add(timer, forMode: .common)
+            self.recordTimer = timer
 
             #if DEBUG
-            print("🎙️ Record timer created and scheduled on main thread")
+            print("🎙️ Record timer created and scheduled on main thread (RunLoop .common mode)")
             #endif
         }
     }

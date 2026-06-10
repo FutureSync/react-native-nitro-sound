@@ -87,6 +87,8 @@ namespace margelo::nitro::sound {
       virtual void setSubscriptionDuration(double sec) = 0;
       virtual void addRecordBackListener(const std::function<void(const RecordBackType& /* recordingMeta */)>& callback) = 0;
       virtual void removeRecordBackListener() = 0;
+      virtual void addRecordingFaultListener(const std::function<void(const std::string& /* reason */)>& callback) = 0;
+      virtual void removeRecordingFaultListener() = 0;
       virtual void addPlayBackListener(const std::function<void(const PlayBackType& /* playbackMeta */)>& callback) = 0;
       virtual void removePlayBackListener() = 0;
       virtual void addPlaybackEndListener(const std::function<void(const PlaybackEndType& /* playbackEndMeta */)>& callback) = 0;

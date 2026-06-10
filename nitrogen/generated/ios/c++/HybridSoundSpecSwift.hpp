@@ -215,6 +215,18 @@ namespace margelo::nitro::sound {
         std::rethrow_exception(__result.error());
       }
     }
+    inline void addRecordingFaultListener(const std::function<void(const std::string& /* reason */)>& callback) override {
+      auto __result = _swiftPart.addRecordingFaultListener(callback);
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline void removeRecordingFaultListener() override {
+      auto __result = _swiftPart.removeRecordingFaultListener();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
     inline void addPlayBackListener(const std::function<void(const PlayBackType& /* playbackMeta */)>& callback) override {
       auto __result = _swiftPart.addPlayBackListener(callback);
       if (__result.hasError()) [[unlikely]] {

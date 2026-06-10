@@ -41,6 +41,7 @@ class HybridSound : HybridSoundSpec() {
     private var playTimer: Timer? = null
 
     private var recordBackListener: ((recordingMeta: RecordBackType) -> Unit)? = null
+    private var recordingFaultListener: ((reason: String) -> Unit)? = null
     private var playBackListener: ((playbackMeta: PlayBackType) -> Unit)? = null
     private var playbackEndListener: ((playbackEndMeta: PlaybackEndType) -> Unit)? = null
 
@@ -96,7 +97,7 @@ class HybridSound : HybridSoundSpec() {
                     )
                 }
             }
-            
+
             // Start pending recording if exists (event-driven, no Thread.sleep)
             val params = pendingRecordingParams
             val promise = pendingRecordingPromise
@@ -111,8 +112,23 @@ class HybridSound : HybridSoundSpec() {
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            val wasRecording = recordingService?.isCurrentlyRecording() == true
             recordingService = null
             isServiceBound = false
+
+            if (wasRecording) {
+                Logger.e("[Sound] Service disconnected unexpectedly — OEM may have killed it")
+                handler.post {
+                    recordBackListener?.invoke(
+                        RecordBackType(
+                            isRecording = false,
+                            currentPosition = 0.0,
+                            currentMetering = null,
+                            recordSecs = 0.0
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -631,6 +647,14 @@ class HybridSound : HybridSoundSpec() {
 
     override fun removeRecordBackListener() {
         recordBackListener = null
+    }
+
+    override fun addRecordingFaultListener(callback: (reason: String) -> Unit) {
+        recordingFaultListener = callback
+    }
+
+    override fun removeRecordingFaultListener() {
+        recordingFaultListener = null
     }
 
     override fun addPlayBackListener(callback: (playbackMeta: PlayBackType) -> Unit) {

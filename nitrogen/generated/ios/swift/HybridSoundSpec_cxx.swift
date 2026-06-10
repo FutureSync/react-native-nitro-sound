@@ -401,6 +401,33 @@ open class HybridSoundSpec_cxx {
   }
   
   @inline(__always)
+  public final func addRecordingFaultListener(callback: bridge.Func_void_std__string) -> bridge.Result_void_ {
+    do {
+      try self.__implementation.addRecordingFaultListener(callback: { () -> (String) -> Void in
+        let __wrappedFunction = bridge.wrap_Func_void_std__string(callback)
+        return { (__reason: String) -> Void in
+          __wrappedFunction.call(std.string(__reason))
+        }
+      }())
+      return bridge.create_Result_void_()
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_void_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
+  public final func removeRecordingFaultListener() -> bridge.Result_void_ {
+    do {
+      try self.__implementation.removeRecordingFaultListener()
+      return bridge.create_Result_void_()
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_void_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
   public final func addPlayBackListener(callback: bridge.Func_void_PlayBackType) -> bridge.Result_void_ {
     do {
       try self.__implementation.addPlayBackListener(callback: { () -> (PlayBackType) -> Void in

@@ -31,6 +31,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import com.margelo.nitro.audiorecorderplayer.Logger
+import com.margelo.nitro.audiorecorderplayer.RecordingConnectionService
 import com.margelo.nitro.audiorecorderplayer.RecordingForegroundService
 import com.margelo.nitro.audiorecorderplayer.WavToM4aConverter
 import com.margelo.nitro.audiorecorderplayer.WavRecorder
@@ -72,6 +73,15 @@ class HybridSound : HybridSoundSpec() {
     private var audioManager: AudioManager? = null
     private var audioFocusChangeListener: AudioManager.OnAudioFocusChangeListener? = null
     private var audioFocusRequest: android.media.AudioFocusRequest? = null
+    // Stage B1: previous AudioManager.mode value, restored when recording stops
+    private var previousAudioMode: Int = AudioManager.MODE_NORMAL
+    private var audioModeWasSwitched: Boolean = false
+
+    // Stage B2: tracks whether we've already registered our PhoneAccount with
+    // Telecom in this process. Idempotent registration, but the @Volatile flag
+    // saves a few JNI hops on subsequent recordings.
+    @Volatile
+    private var telecomRegistered: Boolean = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -265,6 +275,14 @@ class HybridSound : HybridSoundSpec() {
                     subscriptionDuration = subscriptionDuration
                 )
                 
+                // Stage B2 (opt-in via AudioSet.enableTelecomSession): kick off the
+                // self-managed Telecom session BEFORE the FGS starts so Android sees
+                // the call and the FGS as part of the same recording session. Failure
+                // is non-fatal — recording proceeds without Telecom.
+                if (sanitizedAudioSets?.enableTelecomSession == true) {
+                    ensureTelecomSession()
+                }
+
                 // Check if service is already bound and available
                 val existingService = recordingService
                 if (isServiceBound && existingService != null) {
@@ -338,6 +356,9 @@ class HybridSound : HybridSoundSpec() {
                 Logger.d("[resetRecordingState] Stop during reset failed (safe to ignore): ${e.message}")
             }
 
+            // Stage B2: tear down any active Telecom session before unbinding.
+            stopTelecomSession()
+
             handler.post {
                 // Note: The recording timer lives inside RecordingForegroundService
                 // and is stopped automatically by service.stopRecording() above.
@@ -364,7 +385,11 @@ class HybridSound : HybridSoundSpec() {
             try {
                 val service = RecordingForegroundService.getInstance()
                 val wavPath = service?.stopRecording() ?: currentRecordingPath
-                
+
+                // Stage B2: end the Telecom call session immediately. Doing it
+                // before unbinding the FGS keeps the system in a clean state.
+                stopTelecomSession()
+
                 handler.post {
                     // Unbind from service
                     if (isServiceBound) {
@@ -401,6 +426,8 @@ class HybridSound : HybridSoundSpec() {
                 Logger.d("[Sound] stopRecorder returning WAV; convert in restoreRecording or app layer")
                 promise.resolve(fileUri)
             } catch (e: Exception) {
+                // Stage B2: also tear down Telecom session in error path.
+                stopTelecomSession()
                 handler.post {
                     if (isServiceBound) {
                         try {
@@ -1227,6 +1254,8 @@ class HybridSound : HybridSoundSpec() {
      * Cleanup service binding and stop service when an error occurs.
      */
     private fun cleanupServiceOnError() {
+        // Stage B2: end any Telecom session that may have been opened. Idempotent.
+        stopTelecomSession()
         handler.post {
             if (isServiceBound) {
                 try {
@@ -1527,10 +1556,73 @@ class HybridSound : HybridSoundSpec() {
         playTimer = null
     }
 
+    /**
+     * Stage B2: register the PhoneAccount once (lazily) and start a self-managed
+     * Telecom session for the current recording. Every step is wrapped in
+     * try/catch and returns silently on failure — recording must NEVER fail
+     * because the Telecom session failed.
+     *
+     * Only works on Android O (API 26) and above; older devices fall back
+     * cleanly to Stage B1 alone.
+     */
+    private fun ensureTelecomSession() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+        try {
+            if (!telecomRegistered) {
+                if (RecordingConnectionService.registerPhoneAccount(context)) {
+                    telecomRegistered = true
+                } else {
+                    Logger.w("[Sound] ensureTelecomSession: PhoneAccount registration failed; recording continues without Telecom")
+                    return
+                }
+            }
+            val started = RecordingConnectionService.startSession(context)
+            if (!started) {
+                Logger.w("[Sound] ensureTelecomSession: startSession returned false (emergency call active or OEM rejection)")
+            }
+        } catch (t: Throwable) {
+            Logger.w("[Sound] ensureTelecomSession unexpected failure: ${t.message}", t)
+        }
+    }
+
+    /**
+     * Stage B2: tear down the active Telecom session, if any. Idempotent and
+     * non-fatal. Safe to call when Stage B2 was disabled or never started.
+     */
+    private fun stopTelecomSession() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+        try {
+            RecordingConnectionService.stopSession()
+        } catch (t: Throwable) {
+            Logger.w("[Sound] stopTelecomSession failed: ${t.message}", t)
+        }
+    }
+
     // Audio Focus Handling for Call Interruption
     private fun setupAudioFocus() {
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        
+
+        // Stage B1 (mic-keep-alive): switch AudioManager to MODE_IN_COMMUNICATION while
+        // recording. This signals to the system (and to the OEM HAL whitelist) that this
+        // is voice-call-priority audio — the same hint that self-managed Telecom calls
+        // produce — without registering with Telecom. Restored in releaseAudioFocus.
+        try {
+            audioManager?.let { am ->
+                if (!audioModeWasSwitched) {
+                    previousAudioMode = am.mode
+                    am.mode = AudioManager.MODE_IN_COMMUNICATION
+                    audioModeWasSwitched = true
+                    Logger.d("[Sound] AudioManager.mode -> MODE_IN_COMMUNICATION (was $previousAudioMode)")
+                }
+            }
+        } catch (e: Exception) {
+            Logger.w("[Sound] Failed to switch AudioManager.mode: ${e.message}")
+        }
+
         audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
             when (focusChange) {
                 AudioManager.AUDIOFOCUS_LOSS,
@@ -1564,8 +1656,11 @@ class HybridSound : HybridSoundSpec() {
         
         // Use new AudioFocusRequest API for Android 8.0+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // Stage B1: USAGE_VOICE_COMMUNICATION is the AudioAttributes equivalent of
+            // Connection.setAudioModeIsVoip(true). Some OEMs whitelist mic suspension
+            // based on this attribute alone.
             val audioAttributes = android.media.AudioAttributes.Builder()
-                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
             
@@ -1600,6 +1695,20 @@ class HybridSound : HybridSoundSpec() {
             }
         }
         audioFocusChangeListener = null
+
+        // Stage B1: restore AudioManager.mode to whatever it was before we started recording.
+        // Failing to restore can leave the device in MODE_IN_COMMUNICATION, which routes media
+        // playback to the earpiece on some devices.
+        try {
+            if (audioModeWasSwitched) {
+                audioManager?.mode = previousAudioMode
+                Logger.d("[Sound] AudioManager.mode restored to $previousAudioMode")
+                audioModeWasSwitched = false
+            }
+        } catch (e: Exception) {
+            Logger.w("[Sound] Failed to restore AudioManager.mode: ${e.message}")
+        }
+
         audioManager = null
     }
 }

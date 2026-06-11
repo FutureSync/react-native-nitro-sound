@@ -58,6 +58,9 @@ data class AudioSet(
   val AudioEncoderAndroid: AudioEncoderAndroidType?,
   @DoNotStrip
   @Keep
+  val enableTelecomSession: Boolean?,
+  @DoNotStrip
+  @Keep
   val AudioQuality: AudioQualityType?,
   @DoNotStrip
   @Keep
@@ -82,8 +85,8 @@ data class AudioSet(
     @Keep
     @Suppress("unused")
     @JvmStatic
-    private fun fromCpp(AVEncoderAudioQualityKeyIOS: AVEncoderAudioQualityIOSType?, AVModeIOS: AVModeIOSOption?, AVEncodingOptionIOS: AVEncodingOption?, AVFormatIDKeyIOS: AVEncodingOption?, AVNumberOfChannelsKeyIOS: Double?, AVLinearPCMBitDepthKeyIOS: AVLinearPCMBitDepthKeyIOSType?, AVLinearPCMIsBigEndianKeyIOS: Boolean?, AVLinearPCMIsFloatKeyIOS: Boolean?, AVLinearPCMIsNonInterleavedIOS: Boolean?, AVSampleRateKeyIOS: Double?, AudioSourceAndroid: AudioSourceAndroidType?, OutputFormatAndroid: OutputFormatAndroidType?, AudioEncoderAndroid: AudioEncoderAndroidType?, AudioQuality: AudioQualityType?, AudioChannels: Double?, AudioSamplingRate: Double?, AudioEncodingBitRate: Double?, IncludeBase64: Boolean?): AudioSet {
-      return AudioSet(AVEncoderAudioQualityKeyIOS, AVModeIOS, AVEncodingOptionIOS, AVFormatIDKeyIOS, AVNumberOfChannelsKeyIOS, AVLinearPCMBitDepthKeyIOS, AVLinearPCMIsBigEndianKeyIOS, AVLinearPCMIsFloatKeyIOS, AVLinearPCMIsNonInterleavedIOS, AVSampleRateKeyIOS, AudioSourceAndroid, OutputFormatAndroid, AudioEncoderAndroid, AudioQuality, AudioChannels, AudioSamplingRate, AudioEncodingBitRate, IncludeBase64)
+    private fun fromCpp(AVEncoderAudioQualityKeyIOS: AVEncoderAudioQualityIOSType?, AVModeIOS: AVModeIOSOption?, AVEncodingOptionIOS: AVEncodingOption?, AVFormatIDKeyIOS: AVEncodingOption?, AVNumberOfChannelsKeyIOS: Double?, AVLinearPCMBitDepthKeyIOS: AVLinearPCMBitDepthKeyIOSType?, AVLinearPCMIsBigEndianKeyIOS: Boolean?, AVLinearPCMIsFloatKeyIOS: Boolean?, AVLinearPCMIsNonInterleavedIOS: Boolean?, AVSampleRateKeyIOS: Double?, AudioSourceAndroid: AudioSourceAndroidType?, OutputFormatAndroid: OutputFormatAndroidType?, AudioEncoderAndroid: AudioEncoderAndroidType?, enableTelecomSession: Boolean?, AudioQuality: AudioQualityType?, AudioChannels: Double?, AudioSamplingRate: Double?, AudioEncodingBitRate: Double?, IncludeBase64: Boolean?): AudioSet {
+      return AudioSet(AVEncoderAudioQualityKeyIOS, AVModeIOS, AVEncodingOptionIOS, AVFormatIDKeyIOS, AVNumberOfChannelsKeyIOS, AVLinearPCMBitDepthKeyIOS, AVLinearPCMIsBigEndianKeyIOS, AVLinearPCMIsFloatKeyIOS, AVLinearPCMIsNonInterleavedIOS, AVSampleRateKeyIOS, AudioSourceAndroid, OutputFormatAndroid, AudioEncoderAndroid, enableTelecomSession, AudioQuality, AudioChannels, AudioSamplingRate, AudioEncodingBitRate, IncludeBase64)
     }
   }
 }

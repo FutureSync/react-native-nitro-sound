@@ -73,6 +73,8 @@ namespace margelo::nitro::sound {
       jni::local_ref<JOutputFormatAndroidType> OutputFormatAndroid = this->getFieldValue(fieldOutputFormatAndroid);
       static const auto fieldAudioEncoderAndroid = clazz->getField<JAudioEncoderAndroidType>("AudioEncoderAndroid");
       jni::local_ref<JAudioEncoderAndroidType> AudioEncoderAndroid = this->getFieldValue(fieldAudioEncoderAndroid);
+      static const auto fieldEnableTelecomSession = clazz->getField<jni::JBoolean>("enableTelecomSession");
+      jni::local_ref<jni::JBoolean> enableTelecomSession = this->getFieldValue(fieldEnableTelecomSession);
       static const auto fieldAudioQuality = clazz->getField<JAudioQualityType>("AudioQuality");
       jni::local_ref<JAudioQualityType> AudioQuality = this->getFieldValue(fieldAudioQuality);
       static const auto fieldAudioChannels = clazz->getField<jni::JDouble>("AudioChannels");
@@ -97,6 +99,7 @@ namespace margelo::nitro::sound {
         AudioSourceAndroid != nullptr ? std::make_optional(AudioSourceAndroid->toCpp()) : std::nullopt,
         OutputFormatAndroid != nullptr ? std::make_optional(OutputFormatAndroid->toCpp()) : std::nullopt,
         AudioEncoderAndroid != nullptr ? std::make_optional(AudioEncoderAndroid->toCpp()) : std::nullopt,
+        enableTelecomSession != nullptr ? std::make_optional(static_cast<bool>(enableTelecomSession->value())) : std::nullopt,
         AudioQuality != nullptr ? std::make_optional(AudioQuality->toCpp()) : std::nullopt,
         AudioChannels != nullptr ? std::make_optional(AudioChannels->value()) : std::nullopt,
         AudioSamplingRate != nullptr ? std::make_optional(AudioSamplingRate->value()) : std::nullopt,
@@ -111,7 +114,7 @@ namespace margelo::nitro::sound {
      */
     [[maybe_unused]]
     static jni::local_ref<JAudioSet::javaobject> fromCpp(const AudioSet& value) {
-      using JSignature = JAudioSet(jni::alias_ref<JAVEncoderAudioQualityIOSType>, jni::alias_ref<JAVModeIOSOption>, jni::alias_ref<JAVEncodingOption>, jni::alias_ref<JAVEncodingOption>, jni::alias_ref<jni::JDouble>, jni::alias_ref<JAVLinearPCMBitDepthKeyIOSType>, jni::alias_ref<jni::JBoolean>, jni::alias_ref<jni::JBoolean>, jni::alias_ref<jni::JBoolean>, jni::alias_ref<jni::JDouble>, jni::alias_ref<JAudioSourceAndroidType>, jni::alias_ref<JOutputFormatAndroidType>, jni::alias_ref<JAudioEncoderAndroidType>, jni::alias_ref<JAudioQualityType>, jni::alias_ref<jni::JDouble>, jni::alias_ref<jni::JDouble>, jni::alias_ref<jni::JDouble>, jni::alias_ref<jni::JBoolean>);
+      using JSignature = JAudioSet(jni::alias_ref<JAVEncoderAudioQualityIOSType>, jni::alias_ref<JAVModeIOSOption>, jni::alias_ref<JAVEncodingOption>, jni::alias_ref<JAVEncodingOption>, jni::alias_ref<jni::JDouble>, jni::alias_ref<JAVLinearPCMBitDepthKeyIOSType>, jni::alias_ref<jni::JBoolean>, jni::alias_ref<jni::JBoolean>, jni::alias_ref<jni::JBoolean>, jni::alias_ref<jni::JDouble>, jni::alias_ref<JAudioSourceAndroidType>, jni::alias_ref<JOutputFormatAndroidType>, jni::alias_ref<JAudioEncoderAndroidType>, jni::alias_ref<jni::JBoolean>, jni::alias_ref<JAudioQualityType>, jni::alias_ref<jni::JDouble>, jni::alias_ref<jni::JDouble>, jni::alias_ref<jni::JDouble>, jni::alias_ref<jni::JBoolean>);
       static const auto clazz = javaClassStatic();
       static const auto create = clazz->getStaticMethod<JSignature>("fromCpp");
       return create(
@@ -129,6 +132,7 @@ namespace margelo::nitro::sound {
         value.AudioSourceAndroid.has_value() ? JAudioSourceAndroidType::fromCpp(value.AudioSourceAndroid.value()) : nullptr,
         value.OutputFormatAndroid.has_value() ? JOutputFormatAndroidType::fromCpp(value.OutputFormatAndroid.value()) : nullptr,
         value.AudioEncoderAndroid.has_value() ? JAudioEncoderAndroidType::fromCpp(value.AudioEncoderAndroid.value()) : nullptr,
+        value.enableTelecomSession.has_value() ? jni::JBoolean::valueOf(value.enableTelecomSession.value()) : nullptr,
         value.AudioQuality.has_value() ? JAudioQualityType::fromCpp(value.AudioQuality.value()) : nullptr,
         value.AudioChannels.has_value() ? jni::JDouble::valueOf(value.AudioChannels.value()) : nullptr,
         value.AudioSamplingRate.has_value() ? jni::JDouble::valueOf(value.AudioSamplingRate.value()) : nullptr,

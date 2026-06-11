@@ -19,7 +19,7 @@ public extension AudioSet {
   /**
    * Create a new instance of `AudioSet`.
    */
-  init(AVEncoderAudioQualityKeyIOS: AVEncoderAudioQualityIOSType?, AVModeIOS: AVModeIOSOption?, AVEncodingOptionIOS: AVEncodingOption?, AVFormatIDKeyIOS: AVEncodingOption?, AVNumberOfChannelsKeyIOS: Double?, AVLinearPCMBitDepthKeyIOS: AVLinearPCMBitDepthKeyIOSType?, AVLinearPCMIsBigEndianKeyIOS: Bool?, AVLinearPCMIsFloatKeyIOS: Bool?, AVLinearPCMIsNonInterleavedIOS: Bool?, AVSampleRateKeyIOS: Double?, AudioSourceAndroid: AudioSourceAndroidType?, OutputFormatAndroid: OutputFormatAndroidType?, AudioEncoderAndroid: AudioEncoderAndroidType?, AudioQuality: AudioQualityType?, AudioChannels: Double?, AudioSamplingRate: Double?, AudioEncodingBitRate: Double?, IncludeBase64: Bool?) {
+  init(AVEncoderAudioQualityKeyIOS: AVEncoderAudioQualityIOSType?, AVModeIOS: AVModeIOSOption?, AVEncodingOptionIOS: AVEncodingOption?, AVFormatIDKeyIOS: AVEncodingOption?, AVNumberOfChannelsKeyIOS: Double?, AVLinearPCMBitDepthKeyIOS: AVLinearPCMBitDepthKeyIOSType?, AVLinearPCMIsBigEndianKeyIOS: Bool?, AVLinearPCMIsFloatKeyIOS: Bool?, AVLinearPCMIsNonInterleavedIOS: Bool?, AVSampleRateKeyIOS: Double?, AudioSourceAndroid: AudioSourceAndroidType?, OutputFormatAndroid: OutputFormatAndroidType?, AudioEncoderAndroid: AudioEncoderAndroidType?, enableTelecomSession: Bool?, AudioQuality: AudioQualityType?, AudioChannels: Double?, AudioSamplingRate: Double?, AudioEncodingBitRate: Double?, IncludeBase64: Bool?) {
     self.init({ () -> bridge.std__optional_AVEncoderAudioQualityIOSType_ in
       if let __unwrappedValue = AVEncoderAudioQualityKeyIOS {
         return bridge.create_std__optional_AVEncoderAudioQualityIOSType_(__unwrappedValue)
@@ -95,6 +95,12 @@ public extension AudioSet {
     }(), { () -> bridge.std__optional_AudioEncoderAndroidType_ in
       if let __unwrappedValue = AudioEncoderAndroid {
         return bridge.create_std__optional_AudioEncoderAndroidType_(__unwrappedValue)
+      } else {
+        return .init()
+      }
+    }(), { () -> bridge.std__optional_bool_ in
+      if let __unwrappedValue = enableTelecomSession {
+        return bridge.create_std__optional_bool_(__unwrappedValue)
       } else {
         return .init()
       }
@@ -366,6 +372,30 @@ public extension AudioSet {
       self.__AudioEncoderAndroid = { () -> bridge.std__optional_AudioEncoderAndroidType_ in
         if let __unwrappedValue = newValue {
           return bridge.create_std__optional_AudioEncoderAndroidType_(__unwrappedValue)
+        } else {
+          return .init()
+        }
+      }()
+    }
+  }
+  
+  var enableTelecomSession: Bool? {
+    @inline(__always)
+    get {
+      return { () -> Bool? in
+        if bridge.has_value_std__optional_bool_(self.__enableTelecomSession) {
+          let __unwrapped = bridge.get_std__optional_bool_(self.__enableTelecomSession)
+          return __unwrapped
+        } else {
+          return nil
+        }
+      }()
+    }
+    @inline(__always)
+    set {
+      self.__enableTelecomSession = { () -> bridge.std__optional_bool_ in
+        if let __unwrappedValue = newValue {
+          return bridge.create_std__optional_bool_(__unwrappedValue)
         } else {
           return .init()
         }

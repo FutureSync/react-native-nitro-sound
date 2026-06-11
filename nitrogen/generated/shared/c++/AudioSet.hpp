@@ -70,6 +70,7 @@ namespace margelo::nitro::sound {
     std::optional<AudioSourceAndroidType> AudioSourceAndroid     SWIFT_PRIVATE;
     std::optional<OutputFormatAndroidType> OutputFormatAndroid     SWIFT_PRIVATE;
     std::optional<AudioEncoderAndroidType> AudioEncoderAndroid     SWIFT_PRIVATE;
+    std::optional<bool> enableTelecomSession     SWIFT_PRIVATE;
     std::optional<AudioQualityType> AudioQuality     SWIFT_PRIVATE;
     std::optional<double> AudioChannels     SWIFT_PRIVATE;
     std::optional<double> AudioSamplingRate     SWIFT_PRIVATE;
@@ -78,7 +79,7 @@ namespace margelo::nitro::sound {
 
   public:
     AudioSet() = default;
-    explicit AudioSet(std::optional<AVEncoderAudioQualityIOSType> AVEncoderAudioQualityKeyIOS, std::optional<AVModeIOSOption> AVModeIOS, std::optional<AVEncodingOption> AVEncodingOptionIOS, std::optional<AVEncodingOption> AVFormatIDKeyIOS, std::optional<double> AVNumberOfChannelsKeyIOS, std::optional<AVLinearPCMBitDepthKeyIOSType> AVLinearPCMBitDepthKeyIOS, std::optional<bool> AVLinearPCMIsBigEndianKeyIOS, std::optional<bool> AVLinearPCMIsFloatKeyIOS, std::optional<bool> AVLinearPCMIsNonInterleavedIOS, std::optional<double> AVSampleRateKeyIOS, std::optional<AudioSourceAndroidType> AudioSourceAndroid, std::optional<OutputFormatAndroidType> OutputFormatAndroid, std::optional<AudioEncoderAndroidType> AudioEncoderAndroid, std::optional<AudioQualityType> AudioQuality, std::optional<double> AudioChannels, std::optional<double> AudioSamplingRate, std::optional<double> AudioEncodingBitRate, std::optional<bool> IncludeBase64): AVEncoderAudioQualityKeyIOS(AVEncoderAudioQualityKeyIOS), AVModeIOS(AVModeIOS), AVEncodingOptionIOS(AVEncodingOptionIOS), AVFormatIDKeyIOS(AVFormatIDKeyIOS), AVNumberOfChannelsKeyIOS(AVNumberOfChannelsKeyIOS), AVLinearPCMBitDepthKeyIOS(AVLinearPCMBitDepthKeyIOS), AVLinearPCMIsBigEndianKeyIOS(AVLinearPCMIsBigEndianKeyIOS), AVLinearPCMIsFloatKeyIOS(AVLinearPCMIsFloatKeyIOS), AVLinearPCMIsNonInterleavedIOS(AVLinearPCMIsNonInterleavedIOS), AVSampleRateKeyIOS(AVSampleRateKeyIOS), AudioSourceAndroid(AudioSourceAndroid), OutputFormatAndroid(OutputFormatAndroid), AudioEncoderAndroid(AudioEncoderAndroid), AudioQuality(AudioQuality), AudioChannels(AudioChannels), AudioSamplingRate(AudioSamplingRate), AudioEncodingBitRate(AudioEncodingBitRate), IncludeBase64(IncludeBase64) {}
+    explicit AudioSet(std::optional<AVEncoderAudioQualityIOSType> AVEncoderAudioQualityKeyIOS, std::optional<AVModeIOSOption> AVModeIOS, std::optional<AVEncodingOption> AVEncodingOptionIOS, std::optional<AVEncodingOption> AVFormatIDKeyIOS, std::optional<double> AVNumberOfChannelsKeyIOS, std::optional<AVLinearPCMBitDepthKeyIOSType> AVLinearPCMBitDepthKeyIOS, std::optional<bool> AVLinearPCMIsBigEndianKeyIOS, std::optional<bool> AVLinearPCMIsFloatKeyIOS, std::optional<bool> AVLinearPCMIsNonInterleavedIOS, std::optional<double> AVSampleRateKeyIOS, std::optional<AudioSourceAndroidType> AudioSourceAndroid, std::optional<OutputFormatAndroidType> OutputFormatAndroid, std::optional<AudioEncoderAndroidType> AudioEncoderAndroid, std::optional<bool> enableTelecomSession, std::optional<AudioQualityType> AudioQuality, std::optional<double> AudioChannels, std::optional<double> AudioSamplingRate, std::optional<double> AudioEncodingBitRate, std::optional<bool> IncludeBase64): AVEncoderAudioQualityKeyIOS(AVEncoderAudioQualityKeyIOS), AVModeIOS(AVModeIOS), AVEncodingOptionIOS(AVEncodingOptionIOS), AVFormatIDKeyIOS(AVFormatIDKeyIOS), AVNumberOfChannelsKeyIOS(AVNumberOfChannelsKeyIOS), AVLinearPCMBitDepthKeyIOS(AVLinearPCMBitDepthKeyIOS), AVLinearPCMIsBigEndianKeyIOS(AVLinearPCMIsBigEndianKeyIOS), AVLinearPCMIsFloatKeyIOS(AVLinearPCMIsFloatKeyIOS), AVLinearPCMIsNonInterleavedIOS(AVLinearPCMIsNonInterleavedIOS), AVSampleRateKeyIOS(AVSampleRateKeyIOS), AudioSourceAndroid(AudioSourceAndroid), OutputFormatAndroid(OutputFormatAndroid), AudioEncoderAndroid(AudioEncoderAndroid), enableTelecomSession(enableTelecomSession), AudioQuality(AudioQuality), AudioChannels(AudioChannels), AudioSamplingRate(AudioSamplingRate), AudioEncodingBitRate(AudioEncodingBitRate), IncludeBase64(IncludeBase64) {}
   };
 
 } // namespace margelo::nitro::sound
@@ -104,6 +105,7 @@ namespace margelo::nitro {
         JSIConverter<std::optional<margelo::nitro::sound::AudioSourceAndroidType>>::fromJSI(runtime, obj.getProperty(runtime, "AudioSourceAndroid")),
         JSIConverter<std::optional<margelo::nitro::sound::OutputFormatAndroidType>>::fromJSI(runtime, obj.getProperty(runtime, "OutputFormatAndroid")),
         JSIConverter<std::optional<margelo::nitro::sound::AudioEncoderAndroidType>>::fromJSI(runtime, obj.getProperty(runtime, "AudioEncoderAndroid")),
+        JSIConverter<std::optional<bool>>::fromJSI(runtime, obj.getProperty(runtime, "enableTelecomSession")),
         JSIConverter<std::optional<margelo::nitro::sound::AudioQualityType>>::fromJSI(runtime, obj.getProperty(runtime, "AudioQuality")),
         JSIConverter<std::optional<double>>::fromJSI(runtime, obj.getProperty(runtime, "AudioChannels")),
         JSIConverter<std::optional<double>>::fromJSI(runtime, obj.getProperty(runtime, "AudioSamplingRate")),
@@ -126,6 +128,7 @@ namespace margelo::nitro {
       obj.setProperty(runtime, "AudioSourceAndroid", JSIConverter<std::optional<margelo::nitro::sound::AudioSourceAndroidType>>::toJSI(runtime, arg.AudioSourceAndroid));
       obj.setProperty(runtime, "OutputFormatAndroid", JSIConverter<std::optional<margelo::nitro::sound::OutputFormatAndroidType>>::toJSI(runtime, arg.OutputFormatAndroid));
       obj.setProperty(runtime, "AudioEncoderAndroid", JSIConverter<std::optional<margelo::nitro::sound::AudioEncoderAndroidType>>::toJSI(runtime, arg.AudioEncoderAndroid));
+      obj.setProperty(runtime, "enableTelecomSession", JSIConverter<std::optional<bool>>::toJSI(runtime, arg.enableTelecomSession));
       obj.setProperty(runtime, "AudioQuality", JSIConverter<std::optional<margelo::nitro::sound::AudioQualityType>>::toJSI(runtime, arg.AudioQuality));
       obj.setProperty(runtime, "AudioChannels", JSIConverter<std::optional<double>>::toJSI(runtime, arg.AudioChannels));
       obj.setProperty(runtime, "AudioSamplingRate", JSIConverter<std::optional<double>>::toJSI(runtime, arg.AudioSamplingRate));
@@ -154,6 +157,7 @@ namespace margelo::nitro {
       if (!JSIConverter<std::optional<margelo::nitro::sound::AudioSourceAndroidType>>::canConvert(runtime, obj.getProperty(runtime, "AudioSourceAndroid"))) return false;
       if (!JSIConverter<std::optional<margelo::nitro::sound::OutputFormatAndroidType>>::canConvert(runtime, obj.getProperty(runtime, "OutputFormatAndroid"))) return false;
       if (!JSIConverter<std::optional<margelo::nitro::sound::AudioEncoderAndroidType>>::canConvert(runtime, obj.getProperty(runtime, "AudioEncoderAndroid"))) return false;
+      if (!JSIConverter<std::optional<bool>>::canConvert(runtime, obj.getProperty(runtime, "enableTelecomSession"))) return false;
       if (!JSIConverter<std::optional<margelo::nitro::sound::AudioQualityType>>::canConvert(runtime, obj.getProperty(runtime, "AudioQuality"))) return false;
       if (!JSIConverter<std::optional<double>>::canConvert(runtime, obj.getProperty(runtime, "AudioChannels"))) return false;
       if (!JSIConverter<std::optional<double>>::canConvert(runtime, obj.getProperty(runtime, "AudioSamplingRate"))) return false;

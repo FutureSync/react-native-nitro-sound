@@ -102,6 +102,23 @@ export interface AndroidAudioSet {
   AudioSourceAndroid?: AudioSourceAndroidType;
   OutputFormatAndroid?: OutputFormatAndroidType;
   AudioEncoderAndroid?: AudioEncoderAndroidType;
+  /**
+   * Android only. When true, while recording the module additionally registers
+   * a self-managed VoIP call session via Android's Telecom framework. This
+   * signals the OEM HAL to keep the microphone hardware alive when the screen
+   * is off — the same technique used by WhatsApp, Telegram and Signal.
+   *
+   * Falls back silently if Telecom rejects the call (emergency call active,
+   * permission missing, OEM rejection); recording is unaffected.
+   *
+   * Requires the host app to declare the `MANAGE_OWN_CALLS` permission and
+   * the `RecordingConnectionService` in its merged manifest. See the module's
+   * AndroidManifest.xml for the service declaration; the permission is
+   * already declared by this library.
+   *
+   * Default: false (Stage B1 audio-mode-only fix is always on without this).
+   */
+  enableTelecomSession?: boolean;
 }
 
 export interface CommonAudioSet {

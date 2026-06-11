@@ -10,12 +10,47 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- Wake lock permission to keep recording when screen is off -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    
+
+    <!--
+        Stage B2 (opt-in via AudioSet.enableTelecomSession): self-managed Telecom
+        VoIP-call simulation, used to keep the mic alive when the screen is off
+        on aggressive OEM devices. Same approach as react-native-callkeep,
+        WhatsApp, Telegram and Signal.
+
+        MANAGE_OWN_CALLS is a NORMAL protection level permission — auto-granted,
+        no runtime prompt, NOT in Google's restricted-permissions list, no
+        Permissions Declaration Form required. We deliberately do NOT declare
+        READ_CALL_LOG / WRITE_CALL_LOG / READ_PHONE_STATE / CALL_PHONE because
+        self-managed Telecom does not need them and they are the actual cause
+        of Play Store rejections (see callkeep #408).
+    -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+
     <application>
         <service
             android:name="com.margelo.nitro.audiorecorderplayer.RecordingForegroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!--
+            Stage B2: self-managed ConnectionService. Telecom (system_server)
+            binds to this from another process so android:exported MUST be true.
+            BIND_TELECOM_CONNECTION_SERVICE restricts binders to the Telecom
+            framework only.
+
+            foregroundServiceType="microphone" matches what callkeep declares
+            (NOT phoneCall) — both for policy clarity and because the service
+            promotes itself to FGS_TYPE_MICROPHONE inside onCreateOutgoingConnection.
+        -->
+        <service
+            android:name="com.margelo.nitro.audiorecorderplayer.RecordingConnectionService"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
+            android:foregroundServiceType="microphone"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

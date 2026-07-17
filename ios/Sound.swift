@@ -40,6 +40,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
     private var recordingSession: AVAudioSession?
     private var tempAudioFile: URL? // Temporary file for remote audio playback
     private var streamingEncoder: StreamingM4aEncoder?
+    private var streamingPcmTap: StreamingPcmTap?
 
     // MARK: - Recording Methods
 
@@ -793,6 +794,39 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
 
     public func removePlaybackEndListener() throws {
         self.playbackEndListener = nil
+    }
+
+    // MARK: - PCM Streaming Listener
+
+    public func addPcmChunkListener(callback: @escaping (ArrayBuffer) -> Void) throws {
+        print("[Sound.swift] addPcmChunkListener called")
+        if streamingPcmTap == nil {
+            streamingPcmTap = StreamingPcmTap()
+            print("[Sound.swift] StreamingPcmTap created")
+        }
+        streamingPcmTap?.setListener { buffer in
+            print("[Sound.swift] PCM chunk emitted: \(buffer.size) bytes")
+            callback(buffer)
+        }
+        streamingPcmTap?.start(sampleRate: 16000)
+        print("[Sound.swift] StreamingPcmTap.start() called")
+    }
+
+    public func removePcmChunkListener() throws {
+        streamingPcmTap?.setListener(nil)
+        streamingPcmTap?.stop()
+        streamingPcmTap = nil
+    }
+
+    public func startMockPcmStream(wavFilePath: String, sampleRateHz: Double?) throws {
+        if streamingPcmTap == nil {
+            streamingPcmTap = StreamingPcmTap()
+        }
+        streamingPcmTap?.startMock(wavFilePath: wavFilePath, sampleRateHz: sampleRateHz ?? 16000)
+    }
+
+    public func stopMockPcmStream() throws {
+        streamingPcmTap?.stopMock()
     }
 
     // MARK: - Utility Methods
@@ -1607,9 +1641,56 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
                         outputPath: m4aOutputPath
                     )
                     if case .error(let msg) = fallbackResult {
-                        print("[Merge] AssetWriter fallback also FAILED: \(msg)")
-                        promise.reject(withError: RuntimeError.error(withMessage: "Merge failed (both paths): \(msg)"))
-                        return
+                        if WavToM4aConverter.isEncoderUnavailableError(msg) {
+                            print("[Merge] Hardware encoder unavailable, full audio session reset (2s)...")
+                            let session = AVAudioSession.sharedInstance()
+                            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+                            Thread.sleep(forTimeInterval: 2.0)
+
+                            if FileManager.default.fileExists(atPath: m4aOutputPath) {
+                                try? FileManager.default.removeItem(atPath: m4aOutputPath)
+                            }
+                            let retryResult = self.mergeViaAssetWriter(
+                                composition: composition,
+                                outputURL: m4aOutputURL,
+                                outputPath: m4aOutputPath
+                            )
+                            if case .success = retryResult {
+                                print("[Merge] AssetWriter retry succeeded after reset")
+                            } else if case .error(let retryMsg) = retryResult {
+                                print("[Merge] AssetWriter retry also failed: \(retryMsg)")
+                            }
+                        } else {
+                            print("[Merge] AssetWriter failed (non-encoder): \(msg)")
+                        }
+
+                        // ExtAudioFile as final fallback for ALL AssetWriter failures:
+                        // - encoder unavailable (after retry above)
+                        // - reader failures ("Failed to start reading" — common on iPads)
+                        // - audio session activation failures
+                        // ExtAudioFile reads from AVMutableComposition via AVAssetReader
+                        // but uses AudioToolbox for encoding, bypassing hardware encoder.
+                        if !FileManager.default.fileExists(atPath: m4aOutputPath) ||
+                           ((try? FileManager.default.attributesOfItem(atPath: m4aOutputPath))?[.size] as? UInt64 ?? 0) == 0 {
+                            print("[Merge] Trying ExtAudioFile software encoder as final fallback...")
+                            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                            if FileManager.default.fileExists(atPath: m4aOutputPath) {
+                                try? FileManager.default.removeItem(atPath: m4aOutputPath)
+                            }
+                            let extResult = self.mergeViaExtAudioFile(
+                                composition: composition,
+                                outputURL: m4aOutputURL,
+                                outputPath: m4aOutputPath
+                            )
+                            if case .error(let extMsg) = extResult {
+                                print("[Merge] All encode paths FAILED: \(extMsg)")
+                                if FileManager.default.fileExists(atPath: m4aOutputPath) {
+                                    try? FileManager.default.removeItem(atPath: m4aOutputPath)
+                                }
+                                promise.reject(withError: RuntimeError.error(withMessage: "Merge failed (all paths — ExportSession → AssetWriter → ExtAudioFile): \(extMsg)"))
+                                return
+                            }
+                        }
                     }
                 }
 
@@ -1904,6 +1985,7 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
             try session.setActive(true)
         } catch {
             print("[Merge] AssetWriter: Audio session activation failed: \(error)")
+            return .error(message: "Audio session unavailable - hardware AAC encoder cannot be accessed: \(error.localizedDescription)")
         }
 
         let tracks = composition.tracks(withMediaType: .audio)
@@ -2019,6 +2101,155 @@ final class HybridSound: HybridSoundSpec_base, HybridSoundSpec_protocol {
         }
 
         print("[Merge] AssetWriter: completed (\(samplesWritten) buffers)")
+        return .success
+    }
+
+    /// Software encoder fallback for multi-file merge via ExtAudioFile API.
+    /// Reads PCM from the composition and writes AAC using the software codec,
+    /// bypassing the hardware encoder that may be busy/unavailable.
+    private func mergeViaExtAudioFile(
+        composition: AVMutableComposition,
+        outputURL: URL,
+        outputPath: String,
+        bitRate: Int = 128000
+    ) -> MergePathResult {
+        print("[Merge] ExtAudioFile: starting software encode for multi-file merge...")
+
+        let tracks = composition.tracks(withMediaType: .audio)
+        guard let audioTrack = tracks.first else {
+            return .error(message: "ExtAudioFile: No audio track in composition")
+        }
+
+        let formatDescs = audioTrack.formatDescriptions as? [CMFormatDescription] ?? []
+        var sampleRate: Double = 44100
+        var channels: UInt32 = 1
+        if let fmt = formatDescs.first,
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmt)?.pointee {
+            sampleRate = asbd.mSampleRate
+            channels = asbd.mChannelsPerFrame
+        }
+        print("[Merge] ExtAudioFile: source \(sampleRate)Hz, \(channels)ch")
+
+        guard let reader = try? AVAssetReader(asset: composition) else {
+            return .error(message: "ExtAudioFile: Failed to create asset reader")
+        }
+
+        let readerSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        let readerOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: readerSettings)
+        guard reader.canAdd(readerOutput) else {
+            return .error(message: "ExtAudioFile: Cannot add reader output")
+        }
+        reader.add(readerOutput)
+
+        var dstFmt = AudioStreamBasicDescription()
+        dstFmt.mFormatID = kAudioFormatMPEG4AAC
+        dstFmt.mSampleRate = sampleRate
+        dstFmt.mChannelsPerFrame = channels
+        dstFmt.mFramesPerPacket = 1024
+        var propSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        AudioFormatGetProperty(kAudioFormatProperty_FormatInfo, 0, nil, &propSize, &dstFmt)
+
+        if FileManager.default.fileExists(atPath: outputPath) {
+            try? FileManager.default.removeItem(atPath: outputPath)
+        }
+
+        var outRef: ExtAudioFileRef?
+        var status = ExtAudioFileCreateWithURL(
+            outputURL as CFURL, kAudioFileM4AType, &dstFmt, nil,
+            AudioFileFlags.eraseFile.rawValue, &outRef
+        )
+        guard status == noErr, outRef != nil else {
+            return .error(message: "ExtAudioFile: Create output failed (OSStatus \(status))")
+        }
+        defer { if let f = outRef { ExtAudioFileDispose(f) } }
+
+        var codec: UInt32 = kAppleSoftwareAudioCodecManufacturer
+        let codecStatus = ExtAudioFileSetProperty(
+            outRef!, kExtAudioFileProperty_CodecManufacturer,
+            UInt32(MemoryLayout<UInt32>.size), &codec
+        )
+        print("[Merge] ExtAudioFile: software codec \(codecStatus == noErr ? "OK" : "hint ignored (\(codecStatus))")")
+
+        var pcmFmt = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2 * channels,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2 * channels,
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+        propSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        status = ExtAudioFileSetProperty(outRef!, kExtAudioFileProperty_ClientDataFormat, propSize, &pcmFmt)
+        guard status == noErr else {
+            return .error(message: "ExtAudioFile: Set client format failed (OSStatus \(status))")
+        }
+
+        guard reader.startReading() else {
+            return .error(message: "ExtAudioFile: Reader failed to start: \(reader.error?.localizedDescription ?? "unknown")")
+        }
+
+        var totalFrames: Int64 = 0
+        var skippedBuffers = 0
+        while reader.status == .reading {
+            guard let sampleBuffer = readerOutput.copyNextSampleBuffer() else { break }
+
+            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+                skippedBuffers += 1; continue
+            }
+            let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+            guard frameCount > 0 else {
+                skippedBuffers += 1; continue
+            }
+
+            var lengthAtOffset: Int = 0
+            var totalLength: Int = 0
+            var dataPointer: UnsafeMutablePointer<Int8>?
+            let blockStatus = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+            guard blockStatus == kCMBlockBufferNoErr, let ptr = dataPointer else {
+                skippedBuffers += 1; continue
+            }
+
+            var abl = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(
+                    mNumberChannels: channels,
+                    mDataByteSize: UInt32(totalLength),
+                    mData: UnsafeMutableRawPointer(ptr)
+                )
+            )
+            status = ExtAudioFileWrite(outRef!, UInt32(frameCount), &abl)
+            guard status == noErr else {
+                return .error(message: "ExtAudioFile: Encode failed at frame \(totalFrames) (OSStatus \(status))")
+            }
+            totalFrames += Int64(frameCount)
+        }
+
+        if reader.status == .failed {
+            return .error(message: "ExtAudioFile: Reader failed: \(reader.error?.localizedDescription ?? "unknown")")
+        }
+
+        if skippedBuffers > 0 {
+            print("[Merge] ExtAudioFile: WARNING — skipped \(skippedBuffers) unreadable sample buffer(s)")
+        }
+        if totalFrames == 0 {
+            return .error(message: "ExtAudioFile: No audio frames written (skipped \(skippedBuffers) buffers)")
+        }
+
+        ExtAudioFileDispose(outRef!); outRef = nil
+
+        let duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
+        print("[Merge] ExtAudioFile: done, \(totalFrames) frames, \(String(format: "%.2f", duration))s\(skippedBuffers > 0 ? " (\(skippedBuffers) skipped)" : "")")
         return .success
     }
 

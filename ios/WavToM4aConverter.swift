@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 
 /**
  * Converts WAV audio files to M4A (AAC) format.
@@ -18,6 +19,10 @@ class WavToM4aConverter {
         case success(outputPath: String, duration: TimeInterval)
         case error(message: String)
     }
+
+    /// Stores the last AVAssetWriter error for NSError code inspection.
+    /// Set by `convertViaAssetWriter` when encoding fails; read by `convertSync` for fallback decisions.
+    private static var lastWriterError: Error?
     
     /// Default AAC bit rate
     private static let defaultBitRate = 128000
@@ -95,6 +100,30 @@ class WavToM4aConverter {
         let size = (attrs?[.size] as? UInt64) ?? 0
         try? FileManager.default.removeItem(atPath: path)
         print("[WavToM4a] Cleaned up failed output (\(size)B): \(path.components(separatedBy: "/").last ?? path)")
+    }
+
+    /// Check if an error message indicates the hardware AAC encoder is unavailable.
+    /// Uses both NSError code checks (locale-independent) and English string fallback.
+    static func isEncoderUnavailableError(_ message: String, writerError: Error? = nil) -> Bool {
+        if let nsErr = writerError as NSError? {
+            // AVFoundationErrorDomain -11856 = AVErrorEncoderNotFound
+            // AVFoundationErrorDomain -11800 = AVErrorUnknown (often wraps encoder issues)
+            if nsErr.domain == AVFoundationErrorDomain
+                && (nsErr.code == -11856 || nsErr.code == -11800) {
+                return true
+            }
+            if let underlying = nsErr.userInfo[NSUnderlyingErrorKey] as? NSError,
+               underlying.domain == NSOSStatusErrorDomain {
+                // kAudioConverterErr_HardwareInUse = 'hwiu' (0x68776975)
+                // kAudioCodecUnavailableError = also OS-status based
+                let hwCodes: Set<Int> = [-66567, 1752654693 /* 'hwiu' */]
+                if hwCodes.contains(underlying.code) { return true }
+            }
+        }
+        return message.contains("Cannot Encode")
+            || message.contains("Encode failed after 0")
+            || message.contains("encoder unavailable")
+            || message.contains("Audio session unavailable")
     }
 
     /// Format an NSError for detailed diagnostics.
@@ -223,8 +252,55 @@ class WavToM4aConverter {
             wavFilePath: wavFilePath
         )
         
-        if case .error = writerResult {
+        if case .error(let writerError) = writerResult {
             cleanupFailedOutput(outputPath)
+            
+            if Self.isEncoderUnavailableError(writerError, writerError: Self.lastWriterError) {
+                print("[WavToM4a] Hardware encoder unavailable, full audio session reset (2s)...")
+                let session = AVAudioSession.sharedInstance()
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+                Thread.sleep(forTimeInterval: 2.0)
+                
+                let retryResult = convertViaAssetWriter(
+                    wavURL: wavURL,
+                    outputURL: outputURL,
+                    outputPath: outputPath,
+                    bitRate: bitRate,
+                    deleteWavAfterConversion: deleteWavAfterConversion,
+                    wavFilePath: wavFilePath
+                )
+                if case .success = retryResult { return retryResult }
+                if case .error(let retryErr) = retryResult {
+                    print("[WavToM4a] AssetWriter retry also failed: \(retryErr)")
+                    cleanupFailedOutput(outputPath)
+                }
+            } else {
+                print("[WavToM4a] AssetWriter failed (non-encoder): \(writerError)")
+            }
+            
+            // ExtAudioFile as final fallback for ALL AssetWriter failures:
+            // - encoder unavailable (after retry above)
+            // - reader failures ("Failed to start reading" — common on iPads)
+            // - any other AVFoundation-level failure
+            // ExtAudioFile uses AudioToolbox APIs (not AVAssetReader), so it can
+            // handle WAV files that AVFoundation cannot read.
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            print("[WavToM4a] Trying ExtAudioFile software encoder as final fallback...")
+            let extResult = convertViaExtAudioFile(
+                wavURL: wavURL,
+                outputURL: outputURL,
+                outputPath: outputPath,
+                bitRate: bitRate,
+                deleteWavAfterConversion: deleteWavAfterConversion,
+                wavFilePath: wavFilePath
+            )
+            if case .error(let extErr) = extResult {
+                cleanupFailedOutput(outputPath)
+                print("[WavToM4a] ALL ENCODE PATHS FAILED — ExportSession, AssetWriter, ExtAudioFile. WAV preserved at: \(wavFilePath)")
+                print("[WavToM4a] Final error: \(extErr)")
+                return .error(message: "All encode paths failed (ExportSession → AssetWriter → ExtAudioFile): \(extErr)")
+            }
+            return extResult
         }
         
         return writerResult
@@ -343,6 +419,7 @@ class WavToM4aConverter {
         deleteWavAfterConversion: Bool,
         wavFilePath: String
     ) -> ConversionResult {
+        Self.lastWriterError = nil
         guard ensureAudioSessionForEncoding() else {
             return .error(message: "Audio session unavailable - hardware AAC encoder cannot be accessed")
         }
@@ -449,6 +526,7 @@ class WavToM4aConverter {
                 if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
                     if !writerInput.append(sampleBuffer) {
                         let errDetail = detailedError(writer.error)
+                        Self.lastWriterError = writer.error
                         conversionError = "Encode failed after \(samplesWritten) samples: \(writer.error?.localizedDescription ?? "encoder unavailable")"
                         print("[WavToM4a] AssetWriter append() FAILED at sample \(samplesWritten): \(errDetail)")
                         semaphore.signal()
@@ -487,6 +565,7 @@ class WavToM4aConverter {
         if writer.status == .failed {
             let errDetail = detailedError(writer.error)
             print("[WavToM4a] AssetWriter finishWriting FAILED: \(errDetail)")
+            Self.lastWriterError = writer.error
             return .error(message: "Writer failed: \(writer.error?.localizedDescription ?? "unknown")")
         }
         
@@ -496,6 +575,141 @@ class WavToM4aConverter {
             deleteWavAfterConversion: deleteWavAfterConversion,
             wavFilePath: wavFilePath,
             method: "AssetWriter"
+        )
+    }
+
+    // MARK: - ExtAudioFile software encoder (last-resort fallback)
+
+    /// Pure-software WAV → M4A conversion via ExtAudioFile API.
+    /// Does NOT depend on the hardware AAC encoder or a specific audio session state.
+    /// Used as the final fallback when both ExportSession and AssetWriter fail
+    /// (typically "Cannot Encode Media" when hardware encoder is busy/unavailable).
+    private static func convertViaExtAudioFile(
+        wavURL: URL,
+        outputURL: URL,
+        outputPath: String,
+        bitRate: Int,
+        deleteWavAfterConversion: Bool,
+        wavFilePath: String
+    ) -> ConversionResult {
+        print("[WavToM4a] ExtAudioFile: starting software AAC encode...")
+
+        var inRef: ExtAudioFileRef?
+        var outRef: ExtAudioFileRef?
+        defer {
+            if let f = outRef { ExtAudioFileDispose(f) }
+            if let f = inRef { ExtAudioFileDispose(f) }
+        }
+
+        var status = ExtAudioFileOpenURL(wavURL as CFURL, &inRef)
+        guard status == noErr, inRef != nil else {
+            return .error(message: "ExtAudioFile: Open input failed (OSStatus \(status))")
+        }
+
+        var srcFmt = AudioStreamBasicDescription()
+        var propSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        status = ExtAudioFileGetProperty(inRef!, kExtAudioFileProperty_FileDataFormat, &propSize, &srcFmt)
+        guard status == noErr else {
+            return .error(message: "ExtAudioFile: Get format failed (OSStatus \(status))")
+        }
+
+        let sampleRate = srcFmt.mSampleRate
+        let channels = srcFmt.mChannelsPerFrame
+        guard sampleRate > 0, channels > 0 else {
+            return .error(message: "ExtAudioFile: Invalid source (rate=\(sampleRate), ch=\(channels))")
+        }
+        print("[WavToM4a] ExtAudioFile: source \(sampleRate)Hz, \(channels)ch")
+
+        var dstFmt = AudioStreamBasicDescription()
+        dstFmt.mFormatID = kAudioFormatMPEG4AAC
+        dstFmt.mSampleRate = sampleRate
+        dstFmt.mChannelsPerFrame = channels
+        dstFmt.mFramesPerPacket = 1024
+        propSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        AudioFormatGetProperty(kAudioFormatProperty_FormatInfo, 0, nil, &propSize, &dstFmt)
+
+        if FileManager.default.fileExists(atPath: outputPath) {
+            try? FileManager.default.removeItem(atPath: outputPath)
+        }
+
+        status = ExtAudioFileCreateWithURL(
+            outputURL as CFURL, kAudioFileM4AType, &dstFmt, nil,
+            AudioFileFlags.eraseFile.rawValue, &outRef
+        )
+        guard status == noErr, outRef != nil else {
+            return .error(message: "ExtAudioFile: Create output failed (OSStatus \(status))")
+        }
+
+        var codec: UInt32 = kAppleSoftwareAudioCodecManufacturer
+        let codecStatus = ExtAudioFileSetProperty(
+            outRef!, kExtAudioFileProperty_CodecManufacturer,
+            UInt32(MemoryLayout<UInt32>.size), &codec
+        )
+        print("[WavToM4a] ExtAudioFile: software codec \(codecStatus == noErr ? "OK" : "hint ignored (\(codecStatus))")")
+
+        var pcmFmt = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2 * channels,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2 * channels,
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+        propSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        status = ExtAudioFileSetProperty(inRef!, kExtAudioFileProperty_ClientDataFormat, propSize, &pcmFmt)
+        guard status == noErr else {
+            return .error(message: "ExtAudioFile: Set input client format failed (OSStatus \(status))")
+        }
+        status = ExtAudioFileSetProperty(outRef!, kExtAudioFileProperty_ClientDataFormat, propSize, &pcmFmt)
+        guard status == noErr else {
+            return .error(message: "ExtAudioFile: Set output client format failed (OSStatus \(status))")
+        }
+
+        let bufFrames: UInt32 = 8192
+        let bufBytes = Int(bufFrames * pcmFmt.mBytesPerFrame)
+        let buf = UnsafeMutableRawPointer.allocate(byteCount: bufBytes, alignment: 16)
+        defer { buf.deallocate() }
+
+        var totalFrames: Int64 = 0
+        while true {
+            var count = bufFrames
+            var abl = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(
+                    mNumberChannels: channels,
+                    mDataByteSize: UInt32(bufBytes),
+                    mData: buf
+                )
+            )
+            status = ExtAudioFileRead(inRef!, &count, &abl)
+            guard status == noErr else {
+                return .error(message: "ExtAudioFile: Read failed at frame \(totalFrames) (OSStatus \(status))")
+            }
+            if count == 0 { break }
+
+            abl.mBuffers.mDataByteSize = count * pcmFmt.mBytesPerFrame
+            status = ExtAudioFileWrite(outRef!, count, &abl)
+            guard status == noErr else {
+                return .error(message: "ExtAudioFile: Encode failed at frame \(totalFrames) (OSStatus \(status))")
+            }
+            totalFrames += Int64(count)
+        }
+
+        let duration = sampleRate > 0 ? Double(totalFrames) / sampleRate : 0
+        print("[WavToM4a] ExtAudioFile: done, \(totalFrames) frames, \(String(format: "%.2f", duration))s")
+
+        ExtAudioFileDispose(outRef!); outRef = nil
+        ExtAudioFileDispose(inRef!); inRef = nil
+
+        return validateAndFinalize(
+            outputPath: outputPath,
+            duration: duration,
+            deleteWavAfterConversion: deleteWavAfterConversion,
+            wavFilePath: wavFilePath,
+            method: "ExtAudioFile"
         )
     }
 

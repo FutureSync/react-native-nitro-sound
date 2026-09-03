@@ -16,6 +16,8 @@ namespace margelo::nitro::sound { enum class AVEncodingOption; }
 namespace margelo::nitro::sound { enum class AVLinearPCMBitDepthKeyIOSType; }
 // Forward declaration of `AVModeIOSOption` to properly resolve imports.
 namespace margelo::nitro::sound { enum class AVModeIOSOption; }
+// Forward declaration of `ArrayBufferHolder` to properly resolve imports.
+namespace NitroModules { class ArrayBufferHolder; }
 // Forward declaration of `AudioEncoderAndroidType` to properly resolve imports.
 namespace margelo::nitro::sound { enum class AudioEncoderAndroidType; }
 // Forward declaration of `AudioQualityType` to properly resolve imports.
@@ -26,6 +28,8 @@ namespace margelo::nitro::sound { struct AudioSet; }
 namespace margelo::nitro::sound { enum class AudioSourceAndroidType; }
 // Forward declaration of `AudioValidationResult` to properly resolve imports.
 namespace margelo::nitro::sound { struct AudioValidationResult; }
+// Forward declaration of `HybridNativeWebSocketSpec` to properly resolve imports.
+namespace margelo::nitro::sound { class HybridNativeWebSocketSpec; }
 // Forward declaration of `HybridSoundSpec` to properly resolve imports.
 namespace margelo::nitro::sound { class HybridSoundSpec; }
 // Forward declaration of `MergeResult` to properly resolve imports.
@@ -42,6 +46,8 @@ namespace margelo::nitro::sound { struct RecordBackType; }
 namespace margelo::nitro::sound { struct RestoredRecording; }
 
 // Forward declarations of Swift defined types
+// Forward declaration of `HybridNativeWebSocketSpec_cxx` to properly resolve imports.
+namespace NitroSound { class HybridNativeWebSocketSpec_cxx; }
 // Forward declaration of `HybridSoundSpec_cxx` to properly resolve imports.
 namespace NitroSound { class HybridSoundSpec_cxx; }
 
@@ -55,6 +61,7 @@ namespace NitroSound { class HybridSoundSpec_cxx; }
 #include "AudioSet.hpp"
 #include "AudioSourceAndroidType.hpp"
 #include "AudioValidationResult.hpp"
+#include "HybridNativeWebSocketSpec.hpp"
 #include "HybridSoundSpec.hpp"
 #include "MergeResult.hpp"
 #include "OutputFormatAndroidType.hpp"
@@ -62,6 +69,8 @@ namespace NitroSound { class HybridSoundSpec_cxx; }
 #include "PlaybackEndType.hpp"
 #include "RecordBackType.hpp"
 #include "RestoredRecording.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
+#include <NitroModules/ArrayBufferHolder.hpp>
 #include <NitroModules/Promise.hpp>
 #include <NitroModules/PromiseHolder.hpp>
 #include <NitroModules/Result.hpp>
@@ -79,38 +88,38 @@ namespace NitroSound { class HybridSoundSpec_cxx; }
  */
 namespace margelo::nitro::sound::bridge::swift {
 
-  // pragma MARK: std::shared_ptr<Promise<std::string>>
+  // pragma MARK: std::shared_ptr<Promise<void>>
   /**
-   * Specialized version of `std::shared_ptr<Promise<std::string>>`.
+   * Specialized version of `std::shared_ptr<Promise<void>>`.
    */
-  using std__shared_ptr_Promise_std__string__ = std::shared_ptr<Promise<std::string>>;
-  inline std::shared_ptr<Promise<std::string>> create_std__shared_ptr_Promise_std__string__() noexcept {
-    return Promise<std::string>::create();
+  using std__shared_ptr_Promise_void__ = std::shared_ptr<Promise<void>>;
+  inline std::shared_ptr<Promise<void>> create_std__shared_ptr_Promise_void__() noexcept {
+    return Promise<void>::create();
   }
-  inline PromiseHolder<std::string> wrap_std__shared_ptr_Promise_std__string__(std::shared_ptr<Promise<std::string>> promise) noexcept {
-    return PromiseHolder<std::string>(std::move(promise));
+  inline PromiseHolder<void> wrap_std__shared_ptr_Promise_void__(std::shared_ptr<Promise<void>> promise) noexcept {
+    return PromiseHolder<void>(std::move(promise));
   }
   
-  // pragma MARK: std::function<void(const std::string& /* result */)>
+  // pragma MARK: std::function<void()>
   /**
-   * Specialized version of `std::function<void(const std::string&)>`.
+   * Specialized version of `std::function<void()>`.
    */
-  using Func_void_std__string = std::function<void(const std::string& /* result */)>;
+  using Func_void = std::function<void()>;
   /**
-   * Wrapper class for a `std::function<void(const std::string& / * result * /)>`, this can be used from Swift.
+   * Wrapper class for a `std::function<void()>`, this can be used from Swift.
    */
-  class Func_void_std__string_Wrapper final {
+  class Func_void_Wrapper final {
   public:
-    explicit Func_void_std__string_Wrapper(std::function<void(const std::string& /* result */)>&& func): _function(std::make_unique<std::function<void(const std::string& /* result */)>>(std::move(func))) {}
-    inline void call(std::string result) const noexcept {
-      _function->operator()(result);
+    explicit Func_void_Wrapper(std::function<void()>&& func): _function(std::make_unique<std::function<void()>>(std::move(func))) {}
+    inline void call() const noexcept {
+      _function->operator()();
     }
   private:
-    std::unique_ptr<std::function<void(const std::string& /* result */)>> _function;
+    std::unique_ptr<std::function<void()>> _function;
   } SWIFT_NONCOPYABLE;
-  Func_void_std__string create_Func_void_std__string(void* NON_NULL swiftClosureWrapper) noexcept;
-  inline Func_void_std__string_Wrapper wrap_Func_void_std__string(Func_void_std__string value) noexcept {
-    return Func_void_std__string_Wrapper(std::move(value));
+  Func_void create_Func_void(void* NON_NULL swiftClosureWrapper) noexcept;
+  inline Func_void_Wrapper wrap_Func_void(Func_void value) noexcept {
+    return Func_void_Wrapper(std::move(value));
   }
   
   // pragma MARK: std::function<void(const std::exception_ptr& /* error */)>
@@ -133,6 +142,92 @@ namespace margelo::nitro::sound::bridge::swift {
   Func_void_std__exception_ptr create_Func_void_std__exception_ptr(void* NON_NULL swiftClosureWrapper) noexcept;
   inline Func_void_std__exception_ptr_Wrapper wrap_Func_void_std__exception_ptr(Func_void_std__exception_ptr value) noexcept {
     return Func_void_std__exception_ptr_Wrapper(std::move(value));
+  }
+  
+  // pragma MARK: std::function<void(const std::string& /* message */)>
+  /**
+   * Specialized version of `std::function<void(const std::string&)>`.
+   */
+  using Func_void_std__string = std::function<void(const std::string& /* message */)>;
+  /**
+   * Wrapper class for a `std::function<void(const std::string& / * message * /)>`, this can be used from Swift.
+   */
+  class Func_void_std__string_Wrapper final {
+  public:
+    explicit Func_void_std__string_Wrapper(std::function<void(const std::string& /* message */)>&& func): _function(std::make_unique<std::function<void(const std::string& /* message */)>>(std::move(func))) {}
+    inline void call(std::string message) const noexcept {
+      _function->operator()(message);
+    }
+  private:
+    std::unique_ptr<std::function<void(const std::string& /* message */)>> _function;
+  } SWIFT_NONCOPYABLE;
+  Func_void_std__string create_Func_void_std__string(void* NON_NULL swiftClosureWrapper) noexcept;
+  inline Func_void_std__string_Wrapper wrap_Func_void_std__string(Func_void_std__string value) noexcept {
+    return Func_void_std__string_Wrapper(std::move(value));
+  }
+  
+  // pragma MARK: std::function<void(double /* code */, const std::string& /* reason */)>
+  /**
+   * Specialized version of `std::function<void(double, const std::string&)>`.
+   */
+  using Func_void_double_std__string = std::function<void(double /* code */, const std::string& /* reason */)>;
+  /**
+   * Wrapper class for a `std::function<void(double / * code * /, const std::string& / * reason * /)>`, this can be used from Swift.
+   */
+  class Func_void_double_std__string_Wrapper final {
+  public:
+    explicit Func_void_double_std__string_Wrapper(std::function<void(double /* code */, const std::string& /* reason */)>&& func): _function(std::make_unique<std::function<void(double /* code */, const std::string& /* reason */)>>(std::move(func))) {}
+    inline void call(double code, std::string reason) const noexcept {
+      _function->operator()(code, reason);
+    }
+  private:
+    std::unique_ptr<std::function<void(double /* code */, const std::string& /* reason */)>> _function;
+  } SWIFT_NONCOPYABLE;
+  Func_void_double_std__string create_Func_void_double_std__string(void* NON_NULL swiftClosureWrapper) noexcept;
+  inline Func_void_double_std__string_Wrapper wrap_Func_void_double_std__string(Func_void_double_std__string value) noexcept {
+    return Func_void_double_std__string_Wrapper(std::move(value));
+  }
+  
+  // pragma MARK: std::shared_ptr<HybridNativeWebSocketSpec>
+  /**
+   * Specialized version of `std::shared_ptr<HybridNativeWebSocketSpec>`.
+   */
+  using std__shared_ptr_HybridNativeWebSocketSpec_ = std::shared_ptr<HybridNativeWebSocketSpec>;
+  std::shared_ptr<HybridNativeWebSocketSpec> create_std__shared_ptr_HybridNativeWebSocketSpec_(void* NON_NULL swiftUnsafePointer) noexcept;
+  void* NON_NULL get_std__shared_ptr_HybridNativeWebSocketSpec_(std__shared_ptr_HybridNativeWebSocketSpec_ cppType);
+  
+  // pragma MARK: std::weak_ptr<HybridNativeWebSocketSpec>
+  using std__weak_ptr_HybridNativeWebSocketSpec_ = std::weak_ptr<HybridNativeWebSocketSpec>;
+  inline std__weak_ptr_HybridNativeWebSocketSpec_ weakify_std__shared_ptr_HybridNativeWebSocketSpec_(const std::shared_ptr<HybridNativeWebSocketSpec>& strong) noexcept { return strong; }
+  
+  // pragma MARK: Result<std::shared_ptr<Promise<void>>>
+  using Result_std__shared_ptr_Promise_void___ = Result<std::shared_ptr<Promise<void>>>;
+  inline Result_std__shared_ptr_Promise_void___ create_Result_std__shared_ptr_Promise_void___(const std::shared_ptr<Promise<void>>& value) noexcept {
+    return Result<std::shared_ptr<Promise<void>>>::withValue(value);
+  }
+  inline Result_std__shared_ptr_Promise_void___ create_Result_std__shared_ptr_Promise_void___(const std::exception_ptr& error) noexcept {
+    return Result<std::shared_ptr<Promise<void>>>::withError(error);
+  }
+  
+  // pragma MARK: Result<void>
+  using Result_void_ = Result<void>;
+  inline Result_void_ create_Result_void_() noexcept {
+    return Result<void>::withValue();
+  }
+  inline Result_void_ create_Result_void_(const std::exception_ptr& error) noexcept {
+    return Result<void>::withError(error);
+  }
+  
+  // pragma MARK: std::shared_ptr<Promise<std::string>>
+  /**
+   * Specialized version of `std::shared_ptr<Promise<std::string>>`.
+   */
+  using std__shared_ptr_Promise_std__string__ = std::shared_ptr<Promise<std::string>>;
+  inline std::shared_ptr<Promise<std::string>> create_std__shared_ptr_Promise_std__string__() noexcept {
+    return Promise<std::string>::create();
+  }
+  inline PromiseHolder<std::string> wrap_std__shared_ptr_Promise_std__string__(std::shared_ptr<Promise<std::string>> promise) noexcept {
+    return PromiseHolder<std::string>(std::move(promise));
   }
   
   // pragma MARK: std::optional<std::string>
@@ -421,6 +516,28 @@ namespace margelo::nitro::sound::bridge::swift {
     return Func_void_PlaybackEndType_Wrapper(std::move(value));
   }
   
+  // pragma MARK: std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>
+  /**
+   * Specialized version of `std::function<void(const std::shared_ptr<ArrayBuffer>&)>`.
+   */
+  using Func_void_std__shared_ptr_ArrayBuffer_ = std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>;
+  /**
+   * Wrapper class for a `std::function<void(const std::shared_ptr<ArrayBuffer>& / * chunk * /)>`, this can be used from Swift.
+   */
+  class Func_void_std__shared_ptr_ArrayBuffer__Wrapper final {
+  public:
+    explicit Func_void_std__shared_ptr_ArrayBuffer__Wrapper(std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>&& func): _function(std::make_unique<std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>>(std::move(func))) {}
+    inline void call(ArrayBufferHolder chunk) const noexcept {
+      _function->operator()(chunk.getArrayBuffer());
+    }
+  private:
+    std::unique_ptr<std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>> _function;
+  } SWIFT_NONCOPYABLE;
+  Func_void_std__shared_ptr_ArrayBuffer_ create_Func_void_std__shared_ptr_ArrayBuffer_(void* NON_NULL swiftClosureWrapper) noexcept;
+  inline Func_void_std__shared_ptr_ArrayBuffer__Wrapper wrap_Func_void_std__shared_ptr_ArrayBuffer_(Func_void_std__shared_ptr_ArrayBuffer_ value) noexcept {
+    return Func_void_std__shared_ptr_ArrayBuffer__Wrapper(std::move(value));
+  }
+  
   // pragma MARK: std::vector<RestoredRecording>
   /**
    * Specialized version of `std::vector<RestoredRecording>`.
@@ -632,15 +749,6 @@ namespace margelo::nitro::sound::bridge::swift {
   }
   inline Result_std__shared_ptr_Promise_std__string___ create_Result_std__shared_ptr_Promise_std__string___(const std::exception_ptr& error) noexcept {
     return Result<std::shared_ptr<Promise<std::string>>>::withError(error);
-  }
-  
-  // pragma MARK: Result<void>
-  using Result_void_ = Result<void>;
-  inline Result_void_ create_Result_void_() noexcept {
-    return Result<void>::withValue();
-  }
-  inline Result_void_ create_Result_void_(const std::exception_ptr& error) noexcept {
-    return Result<void>::withError(error);
   }
   
   // pragma MARK: Result<std::string>

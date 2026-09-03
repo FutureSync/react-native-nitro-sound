@@ -36,6 +36,8 @@ namespace margelo::nitro::sound { struct RecordBackType; }
 namespace margelo::nitro::sound { struct PlayBackType; }
 // Forward declaration of `PlaybackEndType` to properly resolve imports.
 namespace margelo::nitro::sound { struct PlaybackEndType; }
+// Forward declaration of `ArrayBufferHolder` to properly resolve imports.
+namespace NitroModules { class ArrayBufferHolder; }
 // Forward declaration of `RestoredRecording` to properly resolve imports.
 namespace margelo::nitro::sound { struct RestoredRecording; }
 // Forward declaration of `MergeResult` to properly resolve imports.
@@ -60,6 +62,8 @@ namespace margelo::nitro::sound { struct AudioValidationResult; }
 #include <functional>
 #include "PlayBackType.hpp"
 #include "PlaybackEndType.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
+#include <NitroModules/ArrayBufferHolder.hpp>
 #include "RestoredRecording.hpp"
 #include <vector>
 #include "MergeResult.hpp"
@@ -247,6 +251,30 @@ namespace margelo::nitro::sound {
     }
     inline void removePlaybackEndListener() override {
       auto __result = _swiftPart.removePlaybackEndListener();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline void addPcmChunkListener(const std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>& callback) override {
+      auto __result = _swiftPart.addPcmChunkListener(callback);
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline void removePcmChunkListener() override {
+      auto __result = _swiftPart.removePcmChunkListener();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline void startMockPcmStream(const std::string& wavFilePath, std::optional<double> sampleRateHz) override {
+      auto __result = _swiftPart.startMockPcmStream(wavFilePath, sampleRateHz);
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
+    inline void stopMockPcmStream() override {
+      auto __result = _swiftPart.stopMockPcmStream();
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

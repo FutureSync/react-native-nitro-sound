@@ -34,6 +34,10 @@ public protocol HybridSoundSpec_protocol: HybridObject {
   func removePlayBackListener() throws -> Void
   func addPlaybackEndListener(callback: @escaping (_ playbackEndMeta: PlaybackEndType) -> Void) throws -> Void
   func removePlaybackEndListener() throws -> Void
+  func addPcmChunkListener(callback: @escaping (_ chunk: ArrayBuffer) -> Void) throws -> Void
+  func removePcmChunkListener() throws -> Void
+  func startMockPcmStream(wavFilePath: String, sampleRateHz: Double?) throws -> Void
+  func stopMockPcmStream() throws -> Void
   func mmss(secs: Double) throws -> String
   func mmssss(milisecs: Double) throws -> String
   func restorePendingRecordings(directory: String?) throws -> Promise<[RestoredRecording]>

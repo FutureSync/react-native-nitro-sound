@@ -26,6 +26,8 @@ namespace margelo::nitro::sound { struct AudioSet; }
 namespace margelo::nitro::sound { enum class AudioSourceAndroidType; }
 // Forward declaration of `AudioValidationResult` to properly resolve imports.
 namespace margelo::nitro::sound { struct AudioValidationResult; }
+// Forward declaration of `HybridNativeWebSocketSpec` to properly resolve imports.
+namespace margelo::nitro::sound { class HybridNativeWebSocketSpec; }
 // Forward declaration of `HybridSoundSpec` to properly resolve imports.
 namespace margelo::nitro::sound { class HybridSoundSpec; }
 // Forward declaration of `MergeResult` to properly resolve imports.
@@ -51,6 +53,7 @@ namespace margelo::nitro::sound { struct RestoredRecording; }
 #include "AudioSet.hpp"
 #include "AudioSourceAndroidType.hpp"
 #include "AudioValidationResult.hpp"
+#include "HybridNativeWebSocketSpec.hpp"
 #include "HybridSoundSpec.hpp"
 #include "MergeResult.hpp"
 #include "OutputFormatAndroidType.hpp"
@@ -58,6 +61,7 @@ namespace margelo::nitro::sound { struct RestoredRecording; }
 #include "PlaybackEndType.hpp"
 #include "RecordBackType.hpp"
 #include "RestoredRecording.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
 #include <NitroModules/Promise.hpp>
 #include <NitroModules/Result.hpp>
 #include <exception>
@@ -78,6 +82,8 @@ namespace margelo::nitro::sound { struct RestoredRecording; }
 #include <NitroModules/DateToChronoDate.hpp>
 
 // Forward declarations of Swift defined types
+// Forward declaration of `HybridNativeWebSocketSpec_cxx` to properly resolve imports.
+namespace NitroSound { class HybridNativeWebSocketSpec_cxx; }
 // Forward declaration of `HybridSoundSpec_cxx` to properly resolve imports.
 namespace NitroSound { class HybridSoundSpec_cxx; }
 

@@ -8,17 +8,18 @@
 #include "NitroSound-Swift-Cxx-Bridge.hpp"
 
 // Include C++ implementation defined types
+#include "HybridNativeWebSocketSpecSwift.hpp"
 #include "HybridSoundSpecSwift.hpp"
 #include "NitroSound-Swift-Cxx-Umbrella.hpp"
 #include <NitroModules/NitroDefines.hpp>
 
 namespace margelo::nitro::sound::bridge::swift {
 
-  // pragma MARK: std::function<void(const std::string& /* result */)>
-  Func_void_std__string create_Func_void_std__string(void* NON_NULL swiftClosureWrapper) noexcept {
-    auto swiftClosure = NitroSound::Func_void_std__string::fromUnsafe(swiftClosureWrapper);
-    return [swiftClosure = std::move(swiftClosure)](const std::string& result) mutable -> void {
-      swiftClosure.call(result);
+  // pragma MARK: std::function<void()>
+  Func_void create_Func_void(void* NON_NULL swiftClosureWrapper) noexcept {
+    auto swiftClosure = NitroSound::Func_void::fromUnsafe(swiftClosureWrapper);
+    return [swiftClosure = std::move(swiftClosure)]() mutable -> void {
+      swiftClosure.call();
     };
   }
   
@@ -28,6 +29,38 @@ namespace margelo::nitro::sound::bridge::swift {
     return [swiftClosure = std::move(swiftClosure)](const std::exception_ptr& error) mutable -> void {
       swiftClosure.call(error);
     };
+  }
+  
+  // pragma MARK: std::function<void(const std::string& /* message */)>
+  Func_void_std__string create_Func_void_std__string(void* NON_NULL swiftClosureWrapper) noexcept {
+    auto swiftClosure = NitroSound::Func_void_std__string::fromUnsafe(swiftClosureWrapper);
+    return [swiftClosure = std::move(swiftClosure)](const std::string& message) mutable -> void {
+      swiftClosure.call(message);
+    };
+  }
+  
+  // pragma MARK: std::function<void(double /* code */, const std::string& /* reason */)>
+  Func_void_double_std__string create_Func_void_double_std__string(void* NON_NULL swiftClosureWrapper) noexcept {
+    auto swiftClosure = NitroSound::Func_void_double_std__string::fromUnsafe(swiftClosureWrapper);
+    return [swiftClosure = std::move(swiftClosure)](double code, const std::string& reason) mutable -> void {
+      swiftClosure.call(code, reason);
+    };
+  }
+  
+  // pragma MARK: std::shared_ptr<HybridNativeWebSocketSpec>
+  std::shared_ptr<HybridNativeWebSocketSpec> create_std__shared_ptr_HybridNativeWebSocketSpec_(void* NON_NULL swiftUnsafePointer) noexcept {
+    NitroSound::HybridNativeWebSocketSpec_cxx swiftPart = NitroSound::HybridNativeWebSocketSpec_cxx::fromUnsafe(swiftUnsafePointer);
+    return std::make_shared<margelo::nitro::sound::HybridNativeWebSocketSpecSwift>(swiftPart);
+  }
+  void* NON_NULL get_std__shared_ptr_HybridNativeWebSocketSpec_(std__shared_ptr_HybridNativeWebSocketSpec_ cppType) {
+    std::shared_ptr<margelo::nitro::sound::HybridNativeWebSocketSpecSwift> swiftWrapper = std::dynamic_pointer_cast<margelo::nitro::sound::HybridNativeWebSocketSpecSwift>(cppType);
+    #ifdef NITRO_DEBUG
+    if (swiftWrapper == nullptr) [[unlikely]] {
+      throw std::runtime_error("Class \"HybridNativeWebSocketSpec\" is not implemented in Swift!");
+    }
+    #endif
+    NitroSound::HybridNativeWebSocketSpec_cxx& swiftPart = swiftWrapper->getSwiftPart();
+    return swiftPart.toUnsafe();
   }
   
   // pragma MARK: std::function<void(const RecordBackType& /* recordingMeta */)>
@@ -51,6 +84,14 @@ namespace margelo::nitro::sound::bridge::swift {
     auto swiftClosure = NitroSound::Func_void_PlaybackEndType::fromUnsafe(swiftClosureWrapper);
     return [swiftClosure = std::move(swiftClosure)](const PlaybackEndType& playbackEndMeta) mutable -> void {
       swiftClosure.call(playbackEndMeta);
+    };
+  }
+  
+  // pragma MARK: std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>
+  Func_void_std__shared_ptr_ArrayBuffer_ create_Func_void_std__shared_ptr_ArrayBuffer_(void* NON_NULL swiftClosureWrapper) noexcept {
+    auto swiftClosure = NitroSound::Func_void_std__shared_ptr_ArrayBuffer_::fromUnsafe(swiftClosureWrapper);
+    return [swiftClosure = std::move(swiftClosure)](const std::shared_ptr<ArrayBuffer>& chunk) mutable -> void {
+      swiftClosure.call(ArrayBufferHolder(chunk));
     };
   }
   

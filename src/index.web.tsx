@@ -311,6 +311,18 @@ class SoundWebImpl implements SoundType {
     this.playbackEndListener = null;
   }
 
+  addPcmChunkListener(_callback: (chunk: ArrayBuffer) => void): void {
+    console.warn('[NitroSound Web] addPcmChunkListener not supported on web');
+  }
+
+  removePcmChunkListener(): void {}
+
+  startMockPcmStream(_wavFilePath: string, _sampleRateHz?: number): void {
+    console.warn('[NitroSound Web] startMockPcmStream not supported on web');
+  }
+
+  stopMockPcmStream(): void {}
+
   // Utility methods
   mmss(secs: number): string {
     const minutes = Math.floor(secs / 60);

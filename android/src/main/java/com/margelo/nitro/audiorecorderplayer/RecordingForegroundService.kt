@@ -31,7 +31,7 @@ import java.util.TimerTask
  */
 class RecordingForegroundService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wavRecorder: WavRecorder? = null
+    internal var wavRecorder: WavRecorder? = null
     private var recordTimer: Timer? = null
     
     // Recording state

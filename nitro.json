@@ -11,6 +11,10 @@
     "Sound": {
       "swift": "HybridSound",
       "kotlin": "HybridSound"
+    },
+    "NativeWebSocket": {
+      "swift": "HybridNativeWebSocket",
+      "kotlin": "HybridNativeWebSocket"
     }
   },
   "ignorePaths": ["node_modules"]

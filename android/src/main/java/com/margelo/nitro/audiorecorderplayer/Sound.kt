@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import com.margelo.nitro.NitroModules
+import com.margelo.nitro.core.ArrayBuffer
 import com.margelo.nitro.core.Promise
 import java.io.File
 import java.io.RandomAccessFile
@@ -45,6 +46,9 @@ class HybridSound : HybridSoundSpec() {
     private var recordingFaultListener: ((reason: String) -> Unit)? = null
     private var playBackListener: ((playbackMeta: PlayBackType) -> Unit)? = null
     private var playbackEndListener: ((playbackEndMeta: PlaybackEndType) -> Unit)? = null
+    private var pcmChunkListener: ((chunk: ArrayBuffer) -> Unit)? = null
+    private var mockPcmThread: Thread? = null
+    @Volatile private var isMocking = false
 
     private var subscriptionDuration: Long = 60L
     
@@ -296,15 +300,15 @@ class HybridSound : HybridSoundSpec() {
                     pendingRecordingParams = params
                     pendingRecordingPromise = promise
                     
-                    // Start the foreground service and bind
-                    handler.post {
-                        RecordingForegroundService.start(context)
-                        
-                        val intent = Intent(context, RecordingForegroundService::class.java)
-                        context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-                        
-                        setupAudioFocus()
-                    }
+                    // Start the foreground service and bind immediately (no handler.post
+                    // delay). Both startForegroundService and bindService are thread-safe.
+                    RecordingForegroundService.start(context)
+                    val intent = Intent(context, RecordingForegroundService::class.java)
+                    context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+
+                    // Audio focus setup runs on the main thread (requires Handler for
+                    // listener callbacks) but is non-blocking for recording start.
+                    handler.post { setupAudioFocus() }
                 }
             } catch (e: Exception) {
                 pendingRecordingParams = null
@@ -702,6 +706,67 @@ class HybridSound : HybridSoundSpec() {
         handler.post {
             playbackEndListener = null
         }
+    }
+
+    // PCM Streaming
+    override fun addPcmChunkListener(callback: (chunk: ArrayBuffer) -> Unit) {
+        pcmChunkListener = callback
+        recordingService?.wavRecorder?.pcmChunkListener = { buffer, bytesRead ->
+            val slice = if (bytesRead == buffer.size) buffer else buffer.copyOfRange(0, bytesRead)
+            val arrayBuffer = ArrayBuffer.copy(slice)
+            callback(arrayBuffer)
+        }
+    }
+
+    override fun removePcmChunkListener() {
+        pcmChunkListener = null
+        recordingService?.wavRecorder?.pcmChunkListener = null
+    }
+
+    override fun startMockPcmStream(wavFilePath: String, sampleRateHz: Double?) {
+        stopMockPcmStream()
+
+        val file = File(wavFilePath)
+        if (!file.exists()) {
+            Logger.e("[Sound] Mock WAV file not found: $wavFilePath")
+            return
+        }
+
+        val fileBytes = file.readBytes()
+        if (fileBytes.size <= 44) {
+            Logger.e("[Sound] WAV file too small: ${fileBytes.size} bytes")
+            return
+        }
+
+        val pcmData = fileBytes.copyOfRange(44, fileBytes.size)
+        val rate = sampleRateHz ?: 16000.0
+        val bytesPerTick = (rate * 2.0 * 0.1).toInt()
+
+        isMocking = true
+        mockPcmThread = Thread {
+            var offset = 0
+            while (isMocking && offset < pcmData.size) {
+                val chunkSize = minOf(bytesPerTick, pcmData.size - offset)
+                val chunk = pcmData.copyOfRange(offset, offset + chunkSize)
+                offset += chunkSize
+
+                val arrayBuffer = ArrayBuffer.copy(chunk)
+                pcmChunkListener?.invoke(arrayBuffer)
+
+                try { Thread.sleep(100) } catch (_: InterruptedException) { break }
+            }
+            Logger.d("[Sound] Mock PCM stream finished")
+        }.apply {
+            name = "MockPcmStream"
+            isDaemon = true
+            start()
+        }
+    }
+
+    override fun stopMockPcmStream() {
+        isMocking = false
+        mockPcmThread?.interrupt()
+        mockPcmThread = null
     }
 
     // Utility methods
@@ -1238,6 +1303,13 @@ class HybridSound : HybridSoundSpec() {
             )
             
             if (success) {
+                pcmChunkListener?.let { listener ->
+                    service.wavRecorder?.pcmChunkListener = { buffer, bytesRead ->
+                        val slice = if (bytesRead == buffer.size) buffer else buffer.copyOfRange(0, bytesRead)
+                        val arrayBuffer = ArrayBuffer.copy(slice)
+                        listener(arrayBuffer)
+                    }
+                }
                 val fileUri = Uri.fromFile(File(params.filePath)).toString()
                 promise.resolve(fileUri)
             } else {

@@ -15,11 +15,15 @@
 #include <fbjni/fbjni.h>
 #include <NitroModules/HybridObjectRegistry.hpp>
 
+#include "JHybridNativeWebSocketSpec.hpp"
+#include "JFunc_void.hpp"
+#include "JFunc_void_std__string.hpp"
+#include "JFunc_void_double_std__string.hpp"
 #include "JHybridSoundSpec.hpp"
 #include "JFunc_void_RecordBackType.hpp"
-#include "JFunc_void_std__string.hpp"
 #include "JFunc_void_PlayBackType.hpp"
 #include "JFunc_void_PlaybackEndType.hpp"
+#include "JFunc_void_std__shared_ptr_ArrayBuffer_.hpp"
 #include <NitroModules/DefaultConstructableObject.hpp>
 
 namespace margelo::nitro::sound {
@@ -31,17 +35,29 @@ int initialize(JavaVM* vm) {
 
   return facebook::jni::initialize(vm, [] {
     // Register native JNI methods
+    margelo::nitro::sound::JHybridNativeWebSocketSpec::registerNatives();
+    margelo::nitro::sound::JFunc_void_cxx::registerNatives();
+    margelo::nitro::sound::JFunc_void_std__string_cxx::registerNatives();
+    margelo::nitro::sound::JFunc_void_double_std__string_cxx::registerNatives();
     margelo::nitro::sound::JHybridSoundSpec::registerNatives();
     margelo::nitro::sound::JFunc_void_RecordBackType_cxx::registerNatives();
-    margelo::nitro::sound::JFunc_void_std__string_cxx::registerNatives();
     margelo::nitro::sound::JFunc_void_PlayBackType_cxx::registerNatives();
     margelo::nitro::sound::JFunc_void_PlaybackEndType_cxx::registerNatives();
+    margelo::nitro::sound::JFunc_void_std__shared_ptr_ArrayBuffer__cxx::registerNatives();
 
     // Register Nitro Hybrid Objects
     HybridObjectRegistry::registerHybridObjectConstructor(
       "Sound",
       []() -> std::shared_ptr<HybridObject> {
         static DefaultConstructableObject<JHybridSoundSpec::javaobject> object("com/margelo/nitro/sound/HybridSound");
+        auto instance = object.create();
+        return instance->cthis()->shared();
+      }
+    );
+    HybridObjectRegistry::registerHybridObjectConstructor(
+      "NativeWebSocket",
+      []() -> std::shared_ptr<HybridObject> {
+        static DefaultConstructableObject<JHybridNativeWebSocketSpec::javaobject> object("com/margelo/nitro/sound/HybridNativeWebSocket");
         auto instance = object.create();
         return instance->cthis()->shared();
       }

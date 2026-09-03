@@ -13,7 +13,8 @@ export type ScreenKey =
   | 'SoundHookStates'
   | 'SoundDirect'
   | 'RapidSwitch'
-  | 'Compatibility';
+  | 'Compatibility'
+  | 'PcmStreamTest';
 
 export function HomeScreen({
   onNavigate,
@@ -68,7 +69,6 @@ export function HomeScreen({
       </TouchableOpacity>
 
       {Platform.OS !== 'web' && (
-        // Note: react-native-video is not supported on web; hide this menu on web
         <TouchableOpacity
           style={styles.item}
           onPress={() => onNavigate('Compatibility')}
@@ -78,6 +78,18 @@ export function HomeScreen({
           </Text>
           <Text style={styles.itemDesc}>
             Mount Video and start recorder to reproduce iOS issue
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {Platform.OS !== 'web' && (
+        <TouchableOpacity
+          style={styles.item}
+          onPress={() => onNavigate('PcmStreamTest')}
+        >
+          <Text style={styles.itemTitle}>PCM Stream Test</Text>
+          <Text style={styles.itemDesc}>
+            Test addPcmChunkListener + mock WAV stream
           </Text>
         </TouchableOpacity>
       )}

@@ -34,6 +34,10 @@ namespace margelo::nitro::sound {
       prototype.registerHybridMethod("removePlayBackListener", &HybridSoundSpec::removePlayBackListener);
       prototype.registerHybridMethod("addPlaybackEndListener", &HybridSoundSpec::addPlaybackEndListener);
       prototype.registerHybridMethod("removePlaybackEndListener", &HybridSoundSpec::removePlaybackEndListener);
+      prototype.registerHybridMethod("addPcmChunkListener", &HybridSoundSpec::addPcmChunkListener);
+      prototype.registerHybridMethod("removePcmChunkListener", &HybridSoundSpec::removePcmChunkListener);
+      prototype.registerHybridMethod("startMockPcmStream", &HybridSoundSpec::startMockPcmStream);
+      prototype.registerHybridMethod("stopMockPcmStream", &HybridSoundSpec::stopMockPcmStream);
       prototype.registerHybridMethod("mmss", &HybridSoundSpec::mmss);
       prototype.registerHybridMethod("mmssss", &HybridSoundSpec::mmssss);
       prototype.registerHybridMethod("restorePendingRecordings", &HybridSoundSpec::restorePendingRecordings);

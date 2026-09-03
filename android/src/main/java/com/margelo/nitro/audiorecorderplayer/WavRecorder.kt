@@ -39,6 +39,8 @@ class WavRecorder {
     /** Path to the M4A produced by the streaming encoder (null if encoding failed or not started). */
     var streamingM4aPath: String? = null
         private set
+
+    var pcmChunkListener: ((ByteArray, Int) -> Unit)? = null
     
     // Audio settings
     private var sampleRate: Int = 44100
@@ -566,7 +568,11 @@ class WavRecorder {
 
                     // Feed the same PCM to the streaming M4A encoder
                     streamingEncoder?.encode(buffer, 0, bytesRead)
-                    
+
+                    if (!isPaused) {
+                        pcmChunkListener?.invoke(buffer, bytesRead)
+                    }
+
                     // Calculate max amplitude for metering
                     if (bitsPerSample == 16) {
                         ByteBuffer.wrap(buffer, 0, bytesRead)

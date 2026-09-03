@@ -33,8 +33,10 @@ target_sources(
   # Autolinking Setup
   ../nitrogen/generated/android/NitroSoundOnLoad.cpp
   # Shared Nitrogen C++ sources
+  ../nitrogen/generated/shared/c++/HybridNativeWebSocketSpec.cpp
   ../nitrogen/generated/shared/c++/HybridSoundSpec.cpp
   # Android-specific Nitrogen C++ sources
+  ../nitrogen/generated/android/c++/JHybridNativeWebSocketSpec.cpp
   ../nitrogen/generated/android/c++/JHybridSoundSpec.cpp
 )
 

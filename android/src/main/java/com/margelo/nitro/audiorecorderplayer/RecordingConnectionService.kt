@@ -248,7 +248,11 @@ class RecordingConnectionService : ConnectionService() {
             try {
                 if (activeConnection === connection) {
                     connection.setActive()
-                    Logger.d("[RecordingConnectionService] Connection -> ACTIVE; mic HAL priority engaged")
+                    // Force audio to SPEAKER so the user can hear normally.
+                    // Default VoIP routing goes to EARPIECE which is inaudible
+                    // unless the phone is held to the ear.
+                    connection.setAudioRoute(CallAudioState.ROUTE_SPEAKER)
+                    Logger.d("[RecordingConnectionService] Connection -> ACTIVE; mic HAL priority engaged, route -> SPEAKER")
                 }
             } catch (t: Throwable) {
                 Logger.w("[RecordingConnectionService] setActive failed: ${t.message}", t)
@@ -396,8 +400,18 @@ class RecordingConnectionService : ConnectionService() {
         }
 
         override fun onCallAudioStateChanged(state: CallAudioState?) {
-            // No-op — we don't expose audio routing to the user.
             Logger.d("[RecordingConnectionService] onCallAudioStateChanged: $state")
+            // If Telecom or the system re-routes audio away from SPEAKER
+            // (e.g. Bluetooth connected, headset plugged), force it back.
+            // We never want EARPIECE for a recording session.
+            if (state != null && state.route == CallAudioState.ROUTE_EARPIECE) {
+                try {
+                    setAudioRoute(CallAudioState.ROUTE_SPEAKER)
+                    Logger.d("[RecordingConnectionService] Re-routed from EARPIECE -> SPEAKER")
+                } catch (t: Throwable) {
+                    Logger.w("[RecordingConnectionService] setAudioRoute(SPEAKER) failed: ${t.message}")
+                }
+            }
         }
 
         private fun cleanupAfterDisconnect() {

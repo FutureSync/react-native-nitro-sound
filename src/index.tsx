@@ -1,7 +1,9 @@
 import { NitroModules } from 'react-native-nitro-modules';
 import type { Sound as SoundType } from './specs/Sound.nitro';
+import type { NativeWebSocket as NativeWebSocketType } from './specs/NativeWebSocket.nitro';
 
 export * from './specs/Sound.nitro';
+export * from './specs/NativeWebSocket.nitro';
 
 // Factory: create a new HybridObject instance per call
 export function createSound(): SoundType {
@@ -51,6 +53,28 @@ const Sound: SoundType = new Proxy({} as SoundType, {
 
 export default Sound;
 export { Sound };
+
+// NativeWebSocket factory — each call creates a new independent connection
+export function createNativeWebSocket(): NativeWebSocketType {
+  try {
+    const inst =
+      NitroModules.createHybridObject<NativeWebSocketType>('NativeWebSocket');
+    const proxy = new Proxy(inst, {
+      get(target, prop: keyof NativeWebSocketType) {
+        const value = (target as any)[prop];
+        if (typeof value === 'function') {
+          return value.bind(target);
+        }
+        return value;
+      },
+    });
+    return proxy as NativeWebSocketType;
+  } catch (error) {
+    console.error('Failed to create NativeWebSocket HybridObject:', error);
+    throw new Error(`Failed to create NativeWebSocket HybridObject: ${error}`);
+  }
+}
+
 export { useSound } from './useSound';
 export { useSoundWithStates } from './useSoundWithStates';
 export { useSoundRecorder, useAudioRecorder } from './useSoundRecorder';

@@ -227,6 +227,14 @@ export interface Sound extends HybridObject<{
   ): void;
   removePlaybackEndListener(): void;
 
+  // PCM streaming listener (for real-time STT)
+  addPcmChunkListener(callback: (chunk: ArrayBuffer) => void): void;
+  removePcmChunkListener(): void;
+
+  // Mock PCM source for simulator/emulator testing (no real mic available)
+  startMockPcmStream(wavFilePath: string, sampleRateHz?: number): void;
+  stopMockPcmStream(): void;
+
   // Utility methods
   mmss(secs: number): string;
   mmssss(milisecs: number): string;

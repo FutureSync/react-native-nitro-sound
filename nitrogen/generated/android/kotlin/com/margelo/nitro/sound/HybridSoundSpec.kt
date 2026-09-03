@@ -11,6 +11,7 @@ import androidx.annotation.Keep
 import com.facebook.jni.HybridData
 import com.facebook.proguard.annotations.DoNotStrip
 import com.margelo.nitro.core.Promise
+import com.margelo.nitro.core.ArrayBuffer
 import com.margelo.nitro.core.HybridObject
 
 /**
@@ -145,6 +146,27 @@ abstract class HybridSoundSpec: HybridObject() {
   @DoNotStrip
   @Keep
   abstract fun removePlaybackEndListener(): Unit
+  
+  abstract fun addPcmChunkListener(callback: (chunk: ArrayBuffer) -> Unit): Unit
+  
+  @DoNotStrip
+  @Keep
+  private fun addPcmChunkListener_cxx(callback: Func_void_std__shared_ptr_ArrayBuffer_): Unit {
+    val __result = addPcmChunkListener(callback)
+    return __result
+  }
+  
+  @DoNotStrip
+  @Keep
+  abstract fun removePcmChunkListener(): Unit
+  
+  @DoNotStrip
+  @Keep
+  abstract fun startMockPcmStream(wavFilePath: String, sampleRateHz: Double?): Unit
+  
+  @DoNotStrip
+  @Keep
+  abstract fun stopMockPcmStream(): Unit
   
   @DoNotStrip
   @Keep

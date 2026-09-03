@@ -80,6 +80,10 @@ namespace margelo::nitro::sound { struct PlaybackEndType; }
 #include "PlaybackEndType.hpp"
 #include "JFunc_void_PlaybackEndType.hpp"
 #include "JPlaybackEndType.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
+#include "JFunc_void_std__shared_ptr_ArrayBuffer_.hpp"
+#include <NitroModules/JArrayBuffer.hpp>
+#include <NitroModules/JUnit.hpp>
 
 namespace margelo::nitro::sound {
 
@@ -329,6 +333,22 @@ namespace margelo::nitro::sound {
   }
   void JHybridSoundSpec::removePlaybackEndListener() {
     static const auto method = javaClassStatic()->getMethod<void()>("removePlaybackEndListener");
+    method(_javaPart);
+  }
+  void JHybridSoundSpec::addPcmChunkListener(const std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>& callback) {
+    static const auto method = javaClassStatic()->getMethod<void(jni::alias_ref<JFunc_void_std__shared_ptr_ArrayBuffer_::javaobject> /* callback */)>("addPcmChunkListener_cxx");
+    method(_javaPart, JFunc_void_std__shared_ptr_ArrayBuffer__cxx::fromCpp(callback));
+  }
+  void JHybridSoundSpec::removePcmChunkListener() {
+    static const auto method = javaClassStatic()->getMethod<void()>("removePcmChunkListener");
+    method(_javaPart);
+  }
+  void JHybridSoundSpec::startMockPcmStream(const std::string& wavFilePath, std::optional<double> sampleRateHz) {
+    static const auto method = javaClassStatic()->getMethod<void(jni::alias_ref<jni::JString> /* wavFilePath */, jni::alias_ref<jni::JDouble> /* sampleRateHz */)>("startMockPcmStream");
+    method(_javaPart, jni::make_jstring(wavFilePath), sampleRateHz.has_value() ? jni::JDouble::valueOf(sampleRateHz.value()) : nullptr);
+  }
+  void JHybridSoundSpec::stopMockPcmStream() {
+    static const auto method = javaClassStatic()->getMethod<void()>("stopMockPcmStream");
     method(_javaPart);
   }
   std::string JHybridSoundSpec::mmss(double secs) {

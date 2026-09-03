@@ -6,6 +6,7 @@ import { SoundHookStatesScreen } from './screens/SoundHookStatesScreen';
 import { SoundScreen } from './screens/SoundScreen';
 import { RapidSwitchScreen } from './screens/RapidSwitchScreen';
 import { CompatibilityScreen } from './screens/CompatibilityScreen';
+import { PcmStreamTestScreen } from './screens/PcmStreamTestScreen';
 import {
   SafeAreaProvider,
   useSafeAreaContext,
@@ -32,6 +33,9 @@ function AppInner() {
       )}
       {screen === 'Compatibility' && (
         <CompatibilityScreen onBack={() => setScreen('Home')} />
+      )}
+      {screen === 'PcmStreamTest' && (
+        <PcmStreamTestScreen onBack={() => setScreen('Home')} />
       )}
     </View>
   );

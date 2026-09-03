@@ -11,6 +11,7 @@
 #import <type_traits>
 
 #include "HybridSoundSpecSwift.hpp"
+#include "HybridNativeWebSocketSpecSwift.hpp"
 
 @interface NitroSoundAutolinking : NSObject
 @end
@@ -25,6 +26,13 @@
     "Sound",
     []() -> std::shared_ptr<HybridObject> {
       std::shared_ptr<HybridSoundSpec> hybridObject = NitroSound::NitroSoundAutolinking::createSound();
+      return hybridObject;
+    }
+  );
+  HybridObjectRegistry::registerHybridObjectConstructor(
+    "NativeWebSocket",
+    []() -> std::shared_ptr<HybridObject> {
+      std::shared_ptr<HybridNativeWebSocketSpec> hybridObject = NitroSound::NitroSoundAutolinking::createNativeWebSocket();
       return hybridObject;
     }
   );

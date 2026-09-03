@@ -39,3 +39,4 @@
 
 - Bridge is implemented with `react-native-nitro-modules`. Define the surface in `src/specs/*.nitro.ts`, implement natively (Kotlin/Swift), then regenerate with `yarn nitrogen`/`yarn prepare`.
 - Android/iOS permissions: verify microphone access during local testing (see example app configuration).
+- If using XcodeBuildMCP, use the installed XcodeBuildMCP skill before calling XcodeBuildMCP tools.

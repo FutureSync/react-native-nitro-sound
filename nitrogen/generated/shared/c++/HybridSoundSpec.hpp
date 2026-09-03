@@ -37,6 +37,7 @@ namespace margelo::nitro::sound { struct AudioValidationResult; }
 #include <functional>
 #include "PlayBackType.hpp"
 #include "PlaybackEndType.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
 #include "RestoredRecording.hpp"
 #include <vector>
 #include "MergeResult.hpp"
@@ -93,6 +94,10 @@ namespace margelo::nitro::sound {
       virtual void removePlayBackListener() = 0;
       virtual void addPlaybackEndListener(const std::function<void(const PlaybackEndType& /* playbackEndMeta */)>& callback) = 0;
       virtual void removePlaybackEndListener() = 0;
+      virtual void addPcmChunkListener(const std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>& callback) = 0;
+      virtual void removePcmChunkListener() = 0;
+      virtual void startMockPcmStream(const std::string& wavFilePath, std::optional<double> sampleRateHz) = 0;
+      virtual void stopMockPcmStream() = 0;
       virtual std::string mmss(double secs) = 0;
       virtual std::string mmssss(double milisecs) = 0;
       virtual std::shared_ptr<Promise<std::vector<RestoredRecording>>> restorePendingRecordings(const std::optional<std::string>& directory) = 0;

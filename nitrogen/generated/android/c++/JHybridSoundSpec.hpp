@@ -74,6 +74,10 @@ namespace margelo::nitro::sound {
     void removePlayBackListener() override;
     void addPlaybackEndListener(const std::function<void(const PlaybackEndType& /* playbackEndMeta */)>& callback) override;
     void removePlaybackEndListener() override;
+    void addPcmChunkListener(const std::function<void(const std::shared_ptr<ArrayBuffer>& /* chunk */)>& callback) override;
+    void removePcmChunkListener() override;
+    void startMockPcmStream(const std::string& wavFilePath, std::optional<double> sampleRateHz) override;
+    void stopMockPcmStream() override;
     std::string mmss(double secs) override;
     std::string mmssss(double milisecs) override;
     std::shared_ptr<Promise<std::vector<RestoredRecording>>> restorePendingRecordings(const std::optional<std::string>& directory) override;
